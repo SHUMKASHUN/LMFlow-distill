@@ -43,7 +43,7 @@ def save_history(chat, chat_history_dir):
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
     parser.add_argument("--random_seed", type=int, default=1, help="random seed")
-    parser.add_argument("--learning_rate", type=float, default=1.41e-5, help="learning rate")
+    parser.add_argument("--learning_rate", type=float, default=4e-5, help="learning rate")
     parser.add_argument("--dataset_name", type=str, default="chatgpt-prompt", help="dataset name")
     parser.add_argument("--teacher_name", type=str, default="gpt-3.5-turbo", choices=["gpt-3.5-turbo", "code-davinci-002", "text-davinci-002"], help="teacher model name")
     parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") #gpt2
@@ -56,8 +56,8 @@ def arg_parser():
     parser.add_argument("--validation_split_percentage", type=int, default=20, help="the percentage of validation split")
     parser.add_argument("--demo_example_in_prompt", type=bool, default=False, help="When this flag is True, the prompt will include examplary, samples in the prompt if available from the dataset.")
     parser.add_argument("--local_rank", type=int, help="local rank")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=2, help="train batch size per device") #8
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=2, help="eval batch size per device") #8
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="train batch size per device") #8
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=1, help="eval batch size per device") #8
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
@@ -247,71 +247,60 @@ def main():
             if args.with_tracking:
                 total_loss = 0
 
-            batch_size = args.per_device_train_batch_size
-            batch_index = 0
-            batch_loss = 0
-            while(batch_index < len(test_data)):
-                # For each batch
-                for i in range(batch_size):
-                    batch = test_data[batch_index + i]
+            for step, batch in enumerate(train_dataloader):
+                with accelerator.accumulate(student_model):
 
-                    with accelerator.accumulate(student_model):
-                        # We will use the teacher_model result directly
-                        teacher_top_logprobs = batch['logprobs']['top_log_probs']
-                        teacher_output_tokens = batch['text'] # Text is already encoded
+                    # we will use the teacher_model result directly
+                    teacher_top_logprobs = batch['logprobs']['top_log_probs']
+                    teacher_output_tokens = batch['text'] # Here, text is already encoded
 
-                        # Student model training
+                    teacher_logprobs_list = []
+                    id_list = []
 
-                        teacher_batch = torch.Tensor(teacher_output_tokens).to(torch.int32).to("cuda:0")
-                        outputs = student_model(input_ids = teacher_batch) # student_model: cuda
-                        
-                        block_size = outputs.logits.shape[0] # 512
-                        vob_size = outputs.logits.shape[1] # vocab
+                    for teacher_step in teacher_top_logprobs[-max_tokens:]: 
+                        teacher_logprobs_list.append([])
+                        id_list.append([])
+                        for token, logprob in teacher_step.items():
+                            id = tokenizer.encode(token)[0]
+                            teacher_logprobs_list[-1].append(logprob)
+                            id_list[-1].append(id)
 
-                        # student_logits = outputs.logits[0][-max_tokens:] # outputs.logits.shape = [512, #vocab]
-                        for i in range(block_size-1): # for each input token # bug?
-                            id_list = []
-                            teacher_logprobs_list = []
-                            student_logits = []
-                            # get the teacher & student model output prob
-                            for token, logprob in teacher_top_logprobs[i].items():
-                                id = tokenizer.encode(token)[0]
-                                student_logits.append(outputs.logits[i][id].item()) # find corresponding student model output
-                                teacher_logprobs_list.append(logprob)
-                                id_list.append(id)
-                            teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).reshape(-1).to("cuda")
-                            teacher_probs_tensor = teacher_logprobs_tensor.exp().float() # convert back to regular prob
-                            id_tensor = torch.tensor(id_list)
-                            
-                            student_logits = torch.tensor(student_logits).to("cuda")
-                            student_probs_list = F.softmax(student_logits / student_temp, dim=0)
-                        
-                            # Sum loss within batch
-                            loss = F.kl_div(student_probs_list, teacher_probs_tensor, reduction="sum") / max_tokens
+                    teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).reshape(-1).to("cuda")
+                    teacher_probs_tensor = teacher_logprobs_tensor.exp().float() # convert back to regular prob
+                    id_tensor = torch.tensor(id_list)
 
-                            if (batch_loss == 0):
-                                batch_loss = loss
-                            else:
-                                batch_loss = batch_loss + loss
-                        
-                logger.info(f"loss = {batch_loss}")
-                # We keep track of the loss at each epoch
-                if args.with_tracking:
-                    total_loss += batch_loss.detach().float()
-                batch_loss.requires_grad_(True)
-                accelerator.backward(batch_loss)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+
+                    # student model training
+                    # teacher_batch = tokenizer(teacher_output_tokens, return_tensors='pt').to("cuda") # tokenize & encode
+                    teacher_batch = torch.Tensor(teacher_output_tokens).to(torch.int32).to("cuda:0")
+
+                    outputs = student_model(teacher_batch) # student_model: cuda
+                    student_logits = outputs.logits[-max_tokens:]
+                    student_probs_full = F.softmax(student_logits / student_temp, dim=1)
+                    
+                    row_indices = torch.tensor([[i] * max_num_log_probs for i in range(max_tokens)])
+                    row_indices = row_indices.reshape(-1)
+                    id_tensor = id_tensor.reshape(-1)
+
+                    student_logprobs = student_probs_full[row_indices, id_tensor].log()
+                    student_logprobs = student_logprobs.reshape(-1)
+
+                    loss = F.kl_div(student_logprobs, teacher_probs_tensor, reduction="sum") / max_tokens
+                    logger.info(f"loss = {loss}")
+
+                    # We keep track of the loss at each epoch
+                    if args.with_tracking:
+                        total_loss += loss.detach().float()
+                    accelerator.backward(loss)
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     completed_steps += 1
-
-                # Next batch
-                batch_index = batch_index + batch_size
-
 
 
             # Evaluation
@@ -364,12 +353,6 @@ def main():
         )
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
-            # if args.push_to_hub:
-            #     repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
-
-            # with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-            #     json.dump({"perplexity": perplexity}, f)
-
 
 if __name__ == "__main__":
     main()
