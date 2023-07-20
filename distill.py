@@ -20,10 +20,46 @@ from transformers import (
 )
 from utils import load_special_dataset_for_train
 import argparse
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import math
 from accelerate import Accelerator
 
+# Load teach dataset with jsonl file
+# {
+#     "text": list, #(int)
+#     "logprobs": {
+#         "tokens": list, #(str)
+#         "token_logprobs": list, #(float)
+#         "top_log_probs": dict #(str:float)
+#     }
+# }
+# We only need text and top_log_probs
+class TeacherDataset(Dataset):
+    def __init__(self, data_path: str):
+        print("-----Loading Teacher Dataset-----")
+        self.data = []
+        with open(data_path, "r") as f:
+            for item in jsonlines.Reader(f): 
+                del item["logprobs"]["tokens"] # delete unused tokens
+                del item["logprobs"]["token_logprobs"] # delete unused token_logprobs
+                del item["logprobs"]["top_log_probs"][0] # delete starting null value
+                self.data.append(item)
+        print("-----Finish Loading Teacher Dataset-----")
+
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, index):
+        return{
+            'text': self.data[index]['text'],
+            'top_log_probs': self.data[index]["logprobs"]['top_log_probs']
+        }
+    
+    def collate_fn(self, batch):
+        return{
+            'text': [x['text'] for x in batch],
+            'top_log_probs': [x['top_log_probs'] for x in batch]
+        }
 
 def save_history(chat, chat_history_dir):
     if os.path.exists(f"{chat_history_dir}/chatgpt_distill_history.json"):
@@ -56,8 +92,8 @@ def arg_parser():
     parser.add_argument("--validation_split_percentage", type=int, default=20, help="the percentage of validation split")
     parser.add_argument("--demo_example_in_prompt", type=bool, default=False, help="When this flag is True, the prompt will include examplary, samples in the prompt if available from the dataset.")
     parser.add_argument("--local_rank", type=int, help="local rank")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="train batch size per device") #8
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=1, help="eval batch size per device") #8
+    parser.add_argument("--per_device_train_batch_size", type=int, default=8, help="train batch size per device") #8
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=8, help="eval batch size per device") #8
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
@@ -127,11 +163,11 @@ def main():
     # Setup student model
     logger.info("*** [START] Setting up student model ***")
     config = AutoConfig.from_pretrained(student_name)
-    tokenizer = AutoTokenizer.from_pretrained(student_name, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(student_name, use_fast=False)
     student_model = AutoModelForCausalLM.from_pretrained(
         student_name,
         from_tf=False,
-        config=config,
+        # config=config,
     )
     logger.info("*** [FINISH] Setting up student model ***")
 
@@ -155,20 +191,18 @@ def main():
     for index in random.sample(range(len(train_dataset)), 3):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
-
     # DataLoaders creation:
     logger.info("*** [START] Creating dataloader ***")
-    test_data = []
-    with open("./dataset/Robin/0-120.jsonl", "r") as f:
-        for item in jsonlines.Reader(f):
-            del item["logprobs"]["tokens"][0] # delete null value
-            del item["logprobs"]["token_logprobs"][0]
-            del item["logprobs"]["top_log_probs"][0]
-            test_data.append(item)
 
-    train_dataloader = DataLoader(
-        test_data, shuffle=False, batch_size=args.per_device_train_batch_size
-    )
+    data_path = './dataset/data_0501/0-120.jsonl'
+    teacher_dataset = TeacherDataset(data_path)
+    train_dataloader = DataLoader(teacher_dataset, 
+                                  batch_size=args.per_device_train_batch_size, 
+                                  collate_fn=teacher_dataset.collate_fn)
+
+    # train_dataloader = DataLoader(
+    #     train_dataset, shuffle=False, batch_size=args.per_device_train_batch_size
+    # )
     eval_dataloader = DataLoader(
         eval_dataset, batch_size=args.per_device_eval_batch_size
     )
@@ -237,7 +271,6 @@ def main():
     progress_bar.update(starting_epoch * num_update_steps_per_epoch)
     completed_steps = starting_epoch * num_update_steps_per_epoch
 
-
     # Distill from soft probs.
     if args.teacher_name in ["text-davinci-002"]:
 
@@ -249,49 +282,59 @@ def main():
 
             for step, batch in enumerate(train_dataloader):
                 with accelerator.accumulate(student_model):
+                    batch_loss = 0
+                    for i in range(len(batch)): # for each batch
 
-                    # we will use the teacher_model result directly
-                    teacher_top_logprobs = batch['logprobs']['top_log_probs']
-                    teacher_output_tokens = batch['text'] # Here, text is already encoded
+                        # we will use the teacher_model result directly
+                        teacher_top_logprobs = batch['top_log_probs'][i]
+                        teacher_output_tokens = batch['text'][i]
 
-                    teacher_logprobs_list = []
-                    id_list = []
+                        teacher_logprobs_list = []
+                        id_list = []
+                        for teacher_step in teacher_top_logprobs[-max_tokens:]: # question: why the tail?
+                            teacher_logprobs_list.append([])
+                            id_list.append([])
+                            for token, logprob in teacher_step.items():
+                                id = tokenizer.encode(token)[0]
+                                teacher_logprobs_list[-1].append(logprob)
+                                id_list[-1].append(id)
 
-                    for teacher_step in teacher_top_logprobs[-max_tokens:]: 
-                        teacher_logprobs_list.append([])
-                        id_list.append([])
-                        for token, logprob in teacher_step.items():
-                            id = tokenizer.encode(token)[0]
-                            teacher_logprobs_list[-1].append(logprob)
-                            id_list[-1].append(id)
+                        teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).reshape(-1).to("cuda")
+                        teacher_probs_tensor = teacher_logprobs_tensor.exp().float() # convert back to regular prob
+                        id_tensor = torch.tensor(id_list)
 
-                    teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).reshape(-1).to("cuda")
-                    teacher_probs_tensor = teacher_logprobs_tensor.exp().float() # convert back to regular prob
-                    id_tensor = torch.tensor(id_list)
+                        # student model training
+                        teacher_batch = torch.Tensor(teacher_output_tokens).to(torch.int32).to("cuda:0") # here, teacher_output_tokens is already encoded
 
+                        ### llama
+                        # teacher_batch = teacher_batch.unsqueeze(0)
+                        # outputs = student_model(teacher_batch) # student_model: cuda
+                        # student_logits = outputs.logits[0][-max_tokens:]
+                        ### gpt2
+                        outputs = student_model(teacher_batch) # student_model: cuda
+                        student_logits = outputs.logits[-max_tokens:] # outputs.logits.shape = [512,50257]
 
-                    # student model training
-                    # teacher_batch = tokenizer(teacher_output_tokens, return_tensors='pt').to("cuda") # tokenize & encode
-                    teacher_batch = torch.Tensor(teacher_output_tokens).to(torch.int32).to("cuda:0")
+                        student_probs_full = F.softmax(student_logits / student_temp, dim=1) # [3,50257]
+                        
+                        row_indices = torch.tensor([[i] * max_num_log_probs for i in range(max_tokens)])
+                        row_indices = row_indices.reshape(-1)
+                        id_tensor = id_tensor.reshape(-1)
 
-                    outputs = student_model(teacher_batch) # student_model: cuda
-                    student_logits = outputs.logits[-max_tokens:]
-                    student_probs_full = F.softmax(student_logits / student_temp, dim=1)
-                    
-                    row_indices = torch.tensor([[i] * max_num_log_probs for i in range(max_tokens)])
-                    row_indices = row_indices.reshape(-1)
-                    id_tensor = id_tensor.reshape(-1)
+                        student_logprobs = student_probs_full[row_indices, id_tensor].log() # student_probs_full[row_indices][id_tensor] -> corresponding probs
+                        student_logprobs = student_logprobs.reshape(-1)
 
-                    student_logprobs = student_probs_full[row_indices, id_tensor].log()
-                    student_logprobs = student_logprobs.reshape(-1)
+                        loss = F.kl_div(student_logprobs, teacher_probs_tensor, reduction="sum") / max_tokens
+                        if (batch_loss == 0):
+                            batch_loss = loss
+                        else:
+                            batch_loss = batch_loss + loss
 
-                    loss = F.kl_div(student_logprobs, teacher_probs_tensor, reduction="sum") / max_tokens
-                    logger.info(f"loss = {loss}")
+                    logger.info(f"loss = {batch_loss}")
 
                     # We keep track of the loss at each epoch
                     if args.with_tracking:
-                        total_loss += loss.detach().float()
-                    accelerator.backward(loss)
+                        total_loss += batch_loss.detach().float()
+                    accelerator.backward(batch_loss)
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
