@@ -1,6 +1,6 @@
 # This file contains necessary helper functions
 # e.g. GPT request, create_dataloader
-# import openai
+import openai # comment?
 import random
 import sys
 import numpy as np
@@ -9,6 +9,7 @@ import argparse
 from pathlib import Path
 from filelock import Timeout, FileLock
 import json
+import jsonlines
 import logging
 import re
 from collections import Counter
@@ -334,7 +335,10 @@ def load_customized_dataset(
 
     train_dataset_list = []
     validation_dataset_list = []
-    for task_file in task_file_list:
+    # for task_file in task_file_list:
+    for index, task_file in enumerate(task_file_list):
+        if(index == 1):
+            break
         dataset_args = {}
         extensions = 'json'
 
@@ -390,7 +394,8 @@ def load_special_dataset_for_train(
     local_rank: int = -1,
     preprocessing_num_workers: int = 1,
     cache_dir: str = ".cache/llm-ft/datasets",
-    prompt_structure: str = None,
+    # prompt_structure: str = None,
+    prompt_structure: str = "{input}",
 ):
     # Customized cache mechanism is necessary, since some customized datasets,
     # e.g. super-natural-instructions, have a lot of small datasets, where
