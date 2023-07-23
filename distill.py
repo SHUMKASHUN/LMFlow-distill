@@ -310,53 +310,51 @@ def main():
             for step, batch in enumerate(train_dataloader):
                 with accelerator.accumulate(student_model):
                     with accelerator.autocast():
-                        batch_loss = 0
-
-                        for i in range(len(batch['text'])): # for each batch
-
-                            # we will use the teacher_model result directly
+                        
+                        batch_loss = 0 # sum of loss of example in each batch to for backward propagation
+                        for i in range(len(batch['text'])): # for each example in a batch
+                            
+                            # teacher model output
                             teacher_top_logprobs = batch['top_log_probs'][i]
-                            teacher_output_tokens = batch['text'][i]
-
-                            teacher_logprobs_list = []
-                            id_list = []
-                            for teacher_step in teacher_top_logprobs[-max_tokens:]: # question: why the tail?
-                                teacher_logprobs_list.append([])
-                                id_list.append([])
-                                for token, logprob in teacher_step.items():
-                                    id = tokenizer.encode(token)[0]
-                                    teacher_logprobs_list[-1].append(logprob)
-                                    id_list[-1].append(id)
-
-                            teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).reshape(-1).to(device)
-                            teacher_probs_tensor = teacher_logprobs_tensor.exp().float() # convert back to regular prob
-                            id_tensor = torch.tensor(id_list)
+                            input_tokens = batch['text'][i]
 
                             # student model training
-                            teacher_batch = torch.Tensor(teacher_output_tokens).to(torch.int32).to(device) # here, teacher_output_tokens is already encoded
+                            teacher_batch = torch.Tensor(input_tokens).to(torch.int32).to(device) # teacher_batch.shape = torch.Size([1, 512])
 
-                            ### llama
+                            ### llama-7b
                             teacher_batch = teacher_batch.unsqueeze(0)
-                            outputs = student_model(teacher_batch) # student_model: cuda
-                            student_logits = outputs.logits[0][-max_tokens:]
-                            ### gpt2
-                            # outputs = student_model(teacher_batch) # student_model: cuda
-                            # student_logits = outputs.logits[-max_tokens:] # outputs.logits.shape = [512,50257]
+                            student_outputs = student_model(teacher_batch)
+                            student_logits = student_outputs.logits[0] # outputs.logits[0].shape = [512,32000] already taken log
 
-                            student_probs_full = F.softmax(student_logits / student_temp, dim=1) # [3,50257]
-                            
-                            row_indices = torch.tensor([[i] * max_num_log_probs for i in range(max_tokens)])
-                            row_indices = row_indices.reshape(-1)
-                            id_tensor = id_tensor.reshape(-1)
+                            student_prob_full = F.softmax(student_logits / student_temp, dim=1) # apply softmax to student model
 
-                            student_logprobs = student_probs_full[row_indices, id_tensor].log() # student_probs_full[row_indices][id_tensor] -> corresponding probs
-                            student_logprobs = student_logprobs.reshape(-1)
+                            token_loss = 0
+                            for (index, teacher_step) in enumerate(teacher_top_logprobs): # index of token
+                                teacher_logprobs_list = []
+                                student_logprobs_list = []
+                                for token, logprob in teacher_step.items():
+                                    id = int(token)
+                                    student_logprobs_list.append(student_prob_full[index+1][id]) # token index & id position
+                                    teacher_logprobs_list.append(logprob)
+                                
+                                teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).to(device)
+                                teacher_probs_tensor = teacher_logprobs_tensor.exp().float() # convert back to regular prob
+                                teacher_softmax = F.softmax(teacher_probs_tensor, dim=0)
 
-                            loss = F.kl_div(student_logprobs, teacher_probs_tensor, reduction="sum") / max_tokens
+                                student_logprobs_tensor = torch.squeeze(torch.stack(student_logprobs_list))
+                                student_softmax = F.softmax(student_logprobs_tensor, dim=0)
+                                student_softmax = student_softmax.log()
+
+                                loss = F.kl_div(student_softmax, teacher_softmax)
+                                if (token_loss == 0):
+                                    token_loss = loss
+                                else:
+                                    token_loss = token_loss + loss
+
                             if (batch_loss == 0):
-                                batch_loss = loss
+                                batch_loss = token_loss
                             else:
-                                batch_loss = batch_loss + loss
+                                batch_loss = batch_loss + token_loss
 
                         logger.info(f"loss = {batch_loss}")
 
