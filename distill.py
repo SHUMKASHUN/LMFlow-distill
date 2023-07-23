@@ -92,8 +92,8 @@ def arg_parser():
     parser.add_argument("--validation_split_percentage", type=int, default=20, help="the percentage of validation split")
     parser.add_argument("--demo_example_in_prompt", type=bool, default=False, help="When this flag is True, the prompt will include examplary, samples in the prompt if available from the dataset.")
     parser.add_argument("--local_rank", type=int, help="local rank")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device") #8
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="eval batch size per device") #8
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="train batch size per device") #8
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=1, help="eval batch size per device") #8
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
@@ -321,7 +321,7 @@ def main():
                             # student model training
                             teacher_batch = torch.Tensor(input_tokens).to(torch.int32).to(device) # teacher_batch.shape = torch.Size([1, 512])
 
-                            ### llama
+                            ### llama-7b
                             teacher_batch = teacher_batch.unsqueeze(0)
                             student_outputs = student_model(teacher_batch)
                             student_logits = student_outputs.logits[0] # outputs.logits[0].shape = [512,32000] already taken log
@@ -329,7 +329,7 @@ def main():
                             # outputs = student_model(teacher_batch)
                             # student_logits = outputs.logits[-max_tokens:] # outputs.logits.shape = [512,50257]
 
-                            student_prob_full = F.softmax(student_logits / student_temp, dim=1)
+                            student_prob_full = F.softmax(student_logits / student_temp, dim=1) # apply softmax
 
                             token_loss = 0
                             for (index, teacher_step) in enumerate(teacher_top_logprobs): # index of token
@@ -354,10 +354,10 @@ def main():
                                 else:
                                     token_loss = token_loss + loss
 
-                        if (batch_loss == 0):
-                            batch_loss = loss
-                        else:
-                            batch_loss = batch_loss + loss
+                            if (batch_loss == 0):
+                                batch_loss = token_loss
+                            else:
+                                batch_loss = batch_loss + token_loss
 
                         logger.info(f"loss = {batch_loss}")
 
