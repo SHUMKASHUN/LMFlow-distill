@@ -24,16 +24,9 @@ from torch.utils.data import DataLoader, Dataset
 import math
 from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler
-# Load teach dataset with jsonl file
-# {
-#     "text": list, #(int)
-#     "logprobs": {
-#         "tokens": list, #(str)
-#         "token_logprobs": list, #(float)
-#         "top_log_probs": dict #(str:float)
-#     }
-# }
-# We only need text and top_log_probs
+import wandb
+
+# load teach dataset with jsonl file
 class TeacherDataset(Dataset):
     def __init__(self, data_path: str):
         print("-----Loading Teacher Dataset-----")
@@ -92,8 +85,8 @@ def arg_parser():
     parser.add_argument("--validation_split_percentage", type=int, default=20, help="the percentage of validation split")
     parser.add_argument("--demo_example_in_prompt", type=bool, default=False, help="When this flag is True, the prompt will include examplary, samples in the prompt if available from the dataset.")
     parser.add_argument("--local_rank", type=int, help="local rank")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="train batch size per device") #8
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=1, help="eval batch size per device") #8
+    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device") #8
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="eval batch size per device") #8
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
@@ -125,9 +118,7 @@ def arg_parser():
         ),
     )
     parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
-
     args = parser.parse_args()
-
     return args
 
 def main():
@@ -143,7 +134,7 @@ def main():
     logger = logging.getLogger(__name__)
     logger.setLevel(args.log_level)
 
-    # Setup logging
+    # setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
@@ -158,11 +149,10 @@ def main():
         accelerator_log_kwargs["log_with"] = args.report_to
         accelerator_log_kwargs["logging_dir"] = args.output_dir
 
-    # accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, **accelerator_log_kwargs)
     accelerator = Accelerator()
-
     device = accelerator.device
-    # Setup student model
+
+    # setup student model
     logger.info("*** [START] Setting up student model ***")
     config = AutoConfig.from_pretrained(student_name)
     tokenizer = AutoTokenizer.from_pretrained(student_name, use_fast=False)
@@ -175,46 +165,44 @@ def main():
     student_model.to(device)
     logger.info("*** [FINISH] Setting up student model ***")
 
-    # Load dataset
-    logger.info("*** [START] Loading dataset ***")
-    raw_datasets = load_special_dataset_for_train(
-        dataset_name=args.dataset_name,
-        validation_split_percentage=args.validation_split_percentage,
-        demo_example_in_prompt=args.demo_example_in_prompt,
-        local_rank=args.local_rank,
-    )
-    logger.info(f"Load customized dataset complete, "
-                f"training samples {len(raw_datasets['train'])}, "
-                f"validation samples {len(raw_datasets['validation'])}."
-    )
-    train_dataset = raw_datasets["train"]
-    eval_dataset = raw_datasets["validation"]
-    logger.info("*** [FINISH] Loading dataset ***")
+    # # load dataset
+    # logger.info("*** [START] Loading dataset ***")
+    # raw_datasets = load_special_dataset_for_train(
+    #     dataset_name=args.dataset_name,
+    #     validation_split_percentage=args.validation_split_percentage,
+    #     demo_example_in_prompt=args.demo_example_in_prompt,
+    #     local_rank=args.local_rank,
+    # )
+    # logger.info(f"Load customized dataset complete, "
+    #             f"training samples {len(raw_datasets['train'])}, "
+    #             f"validation samples {len(raw_datasets['validation'])}."
+    # )
+    # train_dataset = raw_datasets["train"]
+    # eval_dataset = raw_datasets["validation"]
+    # logger.info("*** [FINISH] Loading dataset ***")
 
-    # Log a few random samples from the training set:
-    for index in random.sample(range(len(train_dataset)), 3):
-        logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
+    # # log a few random samples from the training set
+    # for index in random.sample(range(len(train_dataset)), 3):
+    #     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
-    # DataLoaders creation:
+    # dataLoaders creation
     logger.info("*** [START] Creating dataloader ***")
 
-    data_path = './0-120.jsonl'
+    data_path = './dataset/Robin/0-120.jsonl'
     teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
 
-    # train_dataloader = DataLoader(
-    #     train_dataset, shuffle=False, batch_size=args.per_device_train_batch_size
+    eval_dataloader = train_dataloader
+    # eval_dataloader = DataLoader(
+    #     eval_dataset, batch_size=args.per_device_eval_batch_size
     # )
-    eval_dataloader = DataLoader(
-        eval_dataset, batch_size=args.per_device_eval_batch_size
-    )
     logger.info("*** [FINISH] Creating dataloader ***")
 
-    # Optimizer
+    # optimizer
     logger.info("*** [START] Setting up optimizer and scheduler ***")
-    # Split weights in two groups, one with weight decay and the other not.
+    # split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "layer_norm.weight"]
     optimizer_grouped_parameters = [
         {
@@ -241,7 +229,7 @@ def main():
     #     num_warmup_steps=args.num_warmup_steps * args.gradient_accumulation_steps,
     #     num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     # )
- # Creates Dummy Optimizer if `optimizer` was spcified in the config file else creates Adam Optimizer
+    # Creates Dummy Optimizer if `optimizer` was spcified in the config file else creates Adam Optimizer
     optimizer_cls = (
         torch.optim.AdamW
         if accelerator.state.deepspeed_plugin is None
@@ -279,17 +267,18 @@ def main():
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
         accelerator.init_trackers("clm_no_trainer", experiment_config)
 
-    # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
+    # log training info
+    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num examples = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    # Only show the progress bar once on each machine.
+    
+    # only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
     starting_epoch = 0
@@ -298,118 +287,123 @@ def main():
     progress_bar.update(starting_epoch * num_update_steps_per_epoch)
     completed_steps = starting_epoch * num_update_steps_per_epoch
 
-    # Distill from soft probs.
-    if args.teacher_name in ["text-davinci-002"]:
+    # wandb setup
+    wandb.init(
+        project = "distill-llama-7b",
+        config = {
+            "data_path": './dataset/Robin/0-120.jsonl',
+            "batch_size": args.per_device_train_batch_size,
+            "epoch": args.num_train_epochs,
+        }
+    )
 
-        for epoch in range(starting_epoch, args.num_train_epochs):
-            print("epoch", epoch)
-            student_model.train()
-            if args.with_tracking:
-                total_loss = 0
+    # distill from soft probs
+    for epoch in range(starting_epoch, args.num_train_epochs):
+        print("epoch", epoch)
+        student_model.train()
+        if args.with_tracking:
+            total_loss = 0
 
-            for step, batch in enumerate(train_dataloader):
-                with accelerator.accumulate(student_model):
-                    with accelerator.autocast():
-                        batch_loss = 0
+        for step, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(student_model):
+                with accelerator.autocast():
+                    
+                    batch_loss = 0 # sum of loss of within each batch to for backward propagation
+                    for i in range(len(batch['text'])): # for example in a batch
+                        
+                        # teacher model output
+                        teacher_top_logprobs = batch['top_log_probs'][i]
+                        input_tokens = batch['text'][i]
 
-                        for i in range(len(batch['text'])): # for each batch
+                        # student model training
+                        teacher_batch = torch.Tensor(input_tokens).to(torch.int32).to(device) # teacher_batch.shape = torch.Size([1, 512])
+                        ### llama-7b
+                        teacher_batch = teacher_batch.unsqueeze(0)
+                        student_outputs = student_model(teacher_batch)
+                        student_logits = student_outputs.logits[0] # outputs.logits[0].shape = [512,32000]
+                        student_prob_full = F.softmax(student_logits/student_temp, dim=1) # apply softmax to student model
 
-                            # we will use the teacher_model result directly
-                            teacher_top_logprobs = batch['top_log_probs'][i]
-                            teacher_output_tokens = batch['text'][i]
-
+                        # calculate loss
+                        token_loss = 0
+                        for (index, teacher_step) in enumerate(teacher_top_logprobs): # index of token
                             teacher_logprobs_list = []
-                            id_list = []
-                            for teacher_step in teacher_top_logprobs[-max_tokens:]: # question: why the tail?
-                                teacher_logprobs_list.append([])
-                                id_list.append([])
-                                for token, logprob in teacher_step.items():
-                                    id = tokenizer.encode(token)[0]
-                                    teacher_logprobs_list[-1].append(logprob)
-                                    id_list[-1].append(id)
-
-                            teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).reshape(-1).to(device)
-                            teacher_probs_tensor = teacher_logprobs_tensor.exp().float() # convert back to regular prob
-                            id_tensor = torch.tensor(id_list)
-
-                            # student model training
-                            teacher_batch = torch.Tensor(teacher_output_tokens).to(torch.int32).to(device) # here, teacher_output_tokens is already encoded
-
-                            ### llama
-                            teacher_batch = teacher_batch.unsqueeze(0)
-                            outputs = student_model(teacher_batch) # student_model: cuda
-                            student_logits = outputs.logits[0][-max_tokens:]
-                            ### gpt2
-                            # outputs = student_model(teacher_batch) # student_model: cuda
-                            # student_logits = outputs.logits[-max_tokens:] # outputs.logits.shape = [512,50257]
-
-                            student_probs_full = F.softmax(student_logits / student_temp, dim=1) # [3,50257]
+                            student_logprobs_list = []
+                            for token, logprob in teacher_step.items():
+                                id = int(token)
+                                student_logprobs_list.append(student_prob_full[index+1][id]) # token index & id position
+                                teacher_logprobs_list.append(logprob)
                             
-                            row_indices = torch.tensor([[i] * max_num_log_probs for i in range(max_tokens)])
-                            row_indices = row_indices.reshape(-1)
-                            id_tensor = id_tensor.reshape(-1)
+                            teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).to(device)
+                            teacher_probs_tensor = teacher_logprobs_tensor.exp() # convert back to regular prob
+                            teacher_softmax = F.softmax(teacher_probs_tensor, dim=0)
 
-                            student_logprobs = student_probs_full[row_indices, id_tensor].log() # student_probs_full[row_indices][id_tensor] -> corresponding probs
-                            student_logprobs = student_logprobs.reshape(-1)
+                            student_logprobs_tensor = torch.squeeze(torch.stack(student_logprobs_list))
+                            student_softmax = F.softmax(student_logprobs_tensor, dim=0)
+                            student_softmax = student_softmax.log()
 
-                            loss = F.kl_div(student_logprobs, teacher_probs_tensor, reduction="sum") / max_tokens
-                            if (batch_loss == 0):
-                                batch_loss = loss
+                            loss = F.kl_div(student_softmax, teacher_softmax, reduction="batchmean")
+                            if (token_loss == 0):
+                                token_loss = loss
                             else:
-                                batch_loss = batch_loss + loss
+                                token_loss = token_loss + loss
 
-                        logger.info(f"loss = {batch_loss}")
+                        if (batch_loss == 0):
+                            batch_loss = token_loss
+                        else:
+                            batch_loss = batch_loss + token_loss
 
-                        # We keep track of the loss at each epoch
-                        if args.with_tracking:
-                            total_loss += batch_loss.detach().float()
-                        accelerator.backward(batch_loss)
-                        optimizer.step()
-                        lr_scheduler.step()
-                        optimizer.zero_grad()
+                    logger.info(f"loss = {batch_loss}")
+                    wandb.log({"loss": batch_loss})
+
+                    # We keep track of the loss at each epoch
+                    if args.with_tracking:
+                        total_loss += batch_loss.detach().float()
+                    accelerator.backward(batch_loss)
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+
+            # Checks if the accelerator has performed an optimization step behind the scenes
+            if accelerator.sync_gradients:
+                progress_bar.update(1)
+                completed_steps += 1
 
 
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                if accelerator.sync_gradients:
-                    progress_bar.update(1)
-                    completed_steps += 1
+        # Evaluation
+        student_model.eval()
+        losses = []
+        for step, batch in enumerate(eval_dataloader):
+            
+            with torch.no_grad():
+                prompt = batch['text'][0]
+                eval_batch = tokenizer(prompt, return_tensors='pt').to("cuda")
+                outputs = student_model(**eval_batch)
 
+        losses = torch.tensor(0, dtype=torch.float) # loss to 0
+        try:
+            eval_loss = torch.mean(losses)
+            perplexity = math.exp(eval_loss)
+        except OverflowError:
+            perplexity = float("inf")
 
-            # Evaluation
-            student_model.eval()
-            losses = []
-            for step, batch in enumerate(eval_dataloader):
-                
-                with torch.no_grad():
-                    prompt = batch['text'][0]
-                    eval_batch = tokenizer(prompt, return_tensors='pt').to("cuda")
-                    outputs = student_model(**eval_batch)
+        logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
 
-            losses = torch.tensor(0, dtype=torch.float) # loss to 0
-            try:
-                eval_loss = torch.mean(losses)
-                perplexity = math.exp(eval_loss)
-            except OverflowError:
-                perplexity = float("inf")
+        if args.with_tracking:
+            accelerator.log(
+                {
+                    "perplexity": perplexity,
+                    "eval_loss": eval_loss,
+                    "train_loss": total_loss.item() / len(train_dataloader),
+                    "epoch": epoch,
+                    "step": completed_steps,
+                },
+                step=completed_steps,
+            )
 
-            logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
-
-            if args.with_tracking:
-                accelerator.log(
-                    {
-                        "perplexity": perplexity,
-                        "eval_loss": eval_loss,
-                        "train_loss": total_loss.item() / len(train_dataloader),
-                        "epoch": epoch,
-                        "step": completed_steps,
-                    },
-                    step=completed_steps,
-                )
-
-            output_dir = f"epoch_{epoch}"
-            if args.output_dir is not None:
-                output_dir = os.path.join(args.output_dir, output_dir)
-            accelerator.save_state(output_dir)
+        output_dir = f"epoch_{epoch}"
+        if args.output_dir is not None:
+            output_dir = os.path.join(args.output_dir, output_dir)
+        accelerator.save_state(output_dir)
 
     # Save checkpoint
     student_model.save_pretrained('student_model')
