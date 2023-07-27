@@ -1,12 +1,14 @@
 import logging
 import sys
 import random
-import torch
 import os
 import json
 import jsonlines
 from tqdm import tqdm
+import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.checkpoint import checkpoint
 from transformers import (
     CONFIG_MAPPING,
     MODEL_MAPPING,
@@ -20,7 +22,6 @@ from transformers import (
 )
 from utils import load_special_dataset_for_train
 import argparse
-from torch.utils.data import DataLoader, Dataset
 import math
 from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler
@@ -308,49 +309,91 @@ def main():
             with accelerator.accumulate(student_model):
                 with accelerator.autocast():
                     
-                    batch_loss = 0 # sum of loss of within each batch to for backward propagation
-                    for i in range(len(batch['text'])): # for example in a batch
+                    # batch_loss = 0 # sum of loss of within each batch to for backward propagation
+                    # for i in range(len(batch['text'])): # for each example in a batch
                         
-                        # teacher model output
-                        teacher_top_logprobs = batch['top_log_probs'][i]
-                        input_tokens = batch['text'][i]
+                    #     # teacher model output
+                    #     input_tokens = batch['text'][i]
+                    #     teacher_top_logprobs = batch['top_log_probs'][i]
 
-                        # student model training
-                        teacher_batch = torch.Tensor(input_tokens).to(torch.int32).to(device) # teacher_batch.shape = torch.Size([1, 512])
-                        ### llama-7b
-                        teacher_batch = teacher_batch.unsqueeze(0)
-                        student_outputs = student_model(teacher_batch)
-                        student_logits = student_outputs.logits[0] # outputs.logits[0].shape = [512,32000]
-                        student_prob_full = F.softmax(student_logits/student_temp, dim=1) # apply softmax to student model
+                    #     # student model training
+                    #     teacher_batch = torch.Tensor(input_tokens).to(torch.int32).to(device) # teacher_batch.shape = torch.Size([1, 512])
+                    #     ### llama-7b
+                    #     teacher_batch = teacher_batch.unsqueeze(0)
+                    #     student_outputs = student_model(teacher_batch)
+                    #     student_logits = student_outputs.logits[0] # outputs.logits[0].shape = [512,32000]
+                    #     student_prob_full = F.softmax(student_logits/student_temp, dim=1) # apply softmax to student model
 
-                        # calculate loss
-                        token_loss = 0
-                        for (index, teacher_step) in enumerate(teacher_top_logprobs): # index of token
-                            teacher_logprobs_list = []
-                            student_logprobs_list = []
+                    #     # calculate loss
+                    #     token_loss = 0
+                    #     for (index, teacher_step) in enumerate(teacher_top_logprobs): # index of token
+                    #         teacher_logprobs_list = []
+                    #         student_logprobs_list = []
+                    #         for token, logprob in teacher_step.items():
+                    #             id = int(token)
+                    #             student_logprobs_list.append(student_prob_full[index+1][id]) # token index & id position
+                    #             teacher_logprobs_list.append(logprob)
+                            
+                    #         teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).to(device)
+                    #         teacher_probs_tensor = teacher_logprobs_tensor.exp() # convert back to regular prob
+                    #         teacher_softmax = F.softmax(teacher_probs_tensor, dim=0)
+
+                    #         student_logprobs_tensor = torch.squeeze(torch.stack(student_logprobs_list))
+                    #         student_softmax = F.softmax(student_logprobs_tensor, dim=0)
+                    #         student_softmax = student_softmax.log()
+
+                    #         loss = F.kl_div(student_softmax, teacher_softmax, reduction="batchmean")
+                    #         if (loss < 0): 
+                    #             print(loss)
+                    #         if (token_loss == 0):
+                    #             token_loss = loss
+                    #         else:
+                    #             token_loss = token_loss + loss
+
+                    #     if (batch_loss == 0):
+                    #         batch_loss = token_loss
+                    #     else:
+                    #         batch_loss = batch_loss + token_loss
+
+                    #########
+                    input_tokens = batch['text'] # [2, 512]
+                    teacher_top_logprobs = batch['top_log_probs'] # [2, 511, 5]
+
+                    input_batch = torch.Tensor(input_tokens).to(torch.int32).to(device)
+                    student_outputs = student_model(input_batch)
+                    student_logits = student_outputs.logits # student_outputs.logits.shape = torch.Size([2, 512, 32000])
+                    student_prob_full = F.softmax(student_logits/student_temp, dim=2) # for the 3rd dimension
+
+                    teacher_softmax_list = []
+                    student_softmax_list = []
+                    for (i, teacher_batch) in enumerate(teacher_top_logprobs): # i is the batch index
+                        t = []
+                        s = []
+                        for (j, teacher_step) in enumerate(teacher_batch): # j is the token index
+                            teacher_list = []
+                            student_list = []
                             for token, logprob in teacher_step.items():
                                 id = int(token)
-                                student_logprobs_list.append(student_prob_full[index+1][id]) # token index & id position
-                                teacher_logprobs_list.append(logprob)
-                            
-                            teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).to(device)
+                                teacher_list.append(logprob)
+                                student_list.append(student_prob_full[i][j+1][id])
+
+                            teacher_logprobs_tensor = torch.tensor(teacher_list).to(device)
                             teacher_probs_tensor = teacher_logprobs_tensor.exp() # convert back to regular prob
                             teacher_softmax = F.softmax(teacher_probs_tensor, dim=0)
+                            t.append(teacher_softmax)
 
-                            student_logprobs_tensor = torch.squeeze(torch.stack(student_logprobs_list))
+                            student_logprobs_tensor = torch.squeeze(torch.stack(student_list))
                             student_softmax = F.softmax(student_logprobs_tensor, dim=0)
-                            student_softmax = student_softmax.log()
+                            student_softmax = student_softmax.log()          
+                            s.append(student_softmax)
 
-                            loss = F.kl_div(student_softmax, teacher_softmax, reduction="batchmean")
-                            if (token_loss == 0):
-                                token_loss = loss
-                            else:
-                                token_loss = token_loss + loss
+                        teacher_softmax_list.append(t)
+                        student_softmax_list.append(s)
 
-                        if (batch_loss == 0):
-                            batch_loss = token_loss
-                        else:
-                            batch_loss = batch_loss + token_loss
+                    student_softmax_tensor = torch.stack([torch.stack(sublist) for sublist in student_softmax_list]) # [2, 511, 5]
+                    teacher_softmax_tensor = torch.stack([torch.stack(sublist) for sublist in teacher_softmax_list])
+
+                    batch_loss = F.kl_div(student_softmax_tensor, teacher_softmax_tensor, reduction="batchmean") # [2, 511, 5]
 
                     logger.info(f"loss = {batch_loss}")
                     wandb.log({"loss": batch_loss})
