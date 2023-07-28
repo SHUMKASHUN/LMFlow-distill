@@ -1,14 +1,11 @@
 import logging
 import sys
-import random
 import os
 import json
-import jsonlines
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torch.utils.checkpoint import checkpoint
+from torch.utils.data import DataLoader
 from transformers import (
     CONFIG_MAPPING,
     MODEL_MAPPING,
@@ -20,40 +17,12 @@ from transformers import (
     get_scheduler,
     set_seed
 )
-from utils import load_special_dataset_for_train
+import TeacherDataset
 import argparse
 import math
 from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler
 import wandb
-
-# load teach dataset with jsonl file
-class TeacherDataset(Dataset):
-    def __init__(self, data_path: str):
-        print("-----Loading Teacher Dataset-----")
-        self.data = []
-        with open(data_path, "r") as f:
-            for item in jsonlines.Reader(f): 
-                del item["logprobs"]["tokens"] # delete unused tokens
-                del item["logprobs"]["token_logprobs"] # delete unused token_logprobs
-                del item["logprobs"]["top_log_probs"][0] # delete starting null value
-                self.data.append(item)
-        print("-----Finish Loading Teacher Dataset-----")
-
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, index):
-        return{
-            'text': self.data[index]['text'],
-            'top_log_probs': self.data[index]["logprobs"]['top_log_probs']
-        }
-    
-    def collate_fn(self, batch):
-        return{
-            'text': [x['text'] for x in batch],
-            'top_log_probs': [x['top_log_probs'] for x in batch]
-        }
 
 def save_history(chat, chat_history_dir):
     if os.path.exists(f"{chat_history_dir}/chatgpt_distill_history.json"):
@@ -91,7 +60,7 @@ def arg_parser():
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
-    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
     parser.add_argument("--max_steps", type=int, default=1e10, help="max steps for debug.")
     parser.add_argument(
         "--lr_scheduler_type",
@@ -166,71 +135,29 @@ def main():
     student_model.to(device)
     logger.info("*** [FINISH] Setting up student model ***")
 
-    # # load dataset
-    # logger.info("*** [START] Loading dataset ***")
-    # raw_datasets = load_special_dataset_for_train(
-    #     dataset_name=args.dataset_name,
-    #     validation_split_percentage=args.validation_split_percentage,
-    #     demo_example_in_prompt=args.demo_example_in_prompt,
-    #     local_rank=args.local_rank,
-    # )
-    # logger.info(f"Load customized dataset complete, "
-    #             f"training samples {len(raw_datasets['train'])}, "
-    #             f"validation samples {len(raw_datasets['validation'])}."
-    # )
-    # train_dataset = raw_datasets["train"]
-    # eval_dataset = raw_datasets["validation"]
-    # logger.info("*** [FINISH] Loading dataset ***")
 
-    # # log a few random samples from the training set
-    # for index in random.sample(range(len(train_dataset)), 3):
-    #     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
-
-    # dataLoaders creation
+    # dataloader
     logger.info("*** [START] Creating dataloader ***")
 
     data_path = './dataset/Robin/0-120.jsonl'
+    # data_path = '/home/ksshumab/DistillData/LMFlow/distilled_data.jsonl'
     teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
-
-    eval_dataloader = train_dataloader
-    # eval_dataloader = DataLoader(
-    #     eval_dataset, batch_size=args.per_device_eval_batch_size
-    # )
+    eval_dataloader = train_dataloader # for debug only
     logger.info("*** [FINISH] Creating dataloader ***")
+
 
     # optimizer
     logger.info("*** [START] Setting up optimizer and scheduler ***")
-    # split weights in two groups, one with weight decay and the other not.
-    no_decay = ["bias", "layer_norm.weight"]
-    optimizer_grouped_parameters = [
-        {
-            "params": [p for n, p in student_model.named_parameters() if not any(nd in n for nd in no_decay)],
-            "weight_decay": args.weight_decay,
-        },
-        {
-            "params": [p for n, p in student_model.named_parameters() if any(nd in n for nd in no_decay)],
-            "weight_decay": 0.0,
-        },
-    ]
-    # optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-    # optimizer = torch.optim.AdamW(student_model.parameters(), lr=5e-5)
-    # # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
-    # lr_scheduler = get_scheduler(
-    #     name=args.lr_scheduler_type,
-    #     optimizer=optimizer,
-    #     num_warmup_steps=args.num_warmup_steps * args.gradient_accumulation_steps,
-    #     num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
-    # )
-    # Creates Dummy Optimizer if `optimizer` was spcified in the config file else creates Adam Optimizer
+    # dummy optimizer
     optimizer_cls = (
         torch.optim.AdamW
         if accelerator.state.deepspeed_plugin is None
@@ -238,8 +165,7 @@ def main():
         else DummyOptim 
     )
     optimizer = optimizer_cls(student_model.parameters(), lr=args.learning_rate)
-
-    # Creates Dummy Scheduler if `scheduler` was spcified in the config file else creates `args.lr_scheduler_type` Scheduler
+    # dummy scheduler
     if (
         accelerator.state.deepspeed_plugin is None
         or "scheduler" not in accelerator.state.deepspeed_plugin.deepspeed_config
@@ -254,10 +180,19 @@ def main():
         lr_scheduler = DummyScheduler(
             optimizer, total_num_steps=args.max_train_steps, warmup_num_steps=args.num_warmup_steps
         )
-    # Prepare everything with our `accelerator`.
+    # prepare with accelerator
     student_model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
         student_model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
+
+    # recalculate training steps due to multi-cpus
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    if overrode_max_train_steps:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    # Afterwards we recalculate our number of training epochs
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+
+
     logger.info("*** [FINISH] Setting up optimizer and scheduler ***")
 
     # We need to initialize the trackers we use, and also store our configuration.
@@ -267,7 +202,6 @@ def main():
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
         accelerator.init_trackers("clm_no_trainer", experiment_config)
-
 
     # log training info
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -289,14 +223,15 @@ def main():
     completed_steps = starting_epoch * num_update_steps_per_epoch
 
     # wandb setup
-    wandb.init(
-        project = "distill-llama-7b",
-        config = {
-            "data_path": './dataset/Robin/0-120.jsonl',
-            "batch_size": args.per_device_train_batch_size,
-            "epoch": args.num_train_epochs,
-        }
-    )
+    if accelerator.is_local_main_process:
+        wandb.init(
+            project = "distill-llama-7b",
+            config = {
+                "data_path": './dataset/Robin/0-120.jsonl',
+                "batch_size": args.per_device_train_batch_size,
+                "epoch": args.num_train_epochs,
+            }
+        )
 
     # distill from soft probs
     for epoch in range(starting_epoch, args.num_train_epochs):
@@ -305,98 +240,39 @@ def main():
         if args.with_tracking:
             total_loss = 0
 
-        for step, batch in enumerate(train_dataloader):
+        for batch in train_dataloader:
             with accelerator.accumulate(student_model):
                 with accelerator.autocast():
                     
-                    # batch_loss = 0 # sum of loss of within each batch to for backward propagation
-                    # for i in range(len(batch['text'])): # for each example in a batch
-                        
-                    #     # teacher model output
-                    #     input_tokens = batch['text'][i]
-                    #     teacher_top_logprobs = batch['top_log_probs'][i]
+                    # extract info from batch 
+                    input_token = batch['input_token'] # [b, 512] list
+                    output_token = batch['output_token'] # [b, 511, 5] list
+                    top_logprob = batch['top_logprob'] # [b, 511, 5] list
+                    # to tensor
+                    input_tokens = torch.Tensor(input_token).to(torch.int32).to(device)
+                    output_tokens = torch.Tensor(output_token).to(torch.int64).to(device)
+                    teacher_top_logprob = torch.Tensor(top_logprob).to(device)
 
-                    #     # student model training
-                    #     teacher_batch = torch.Tensor(input_tokens).to(torch.int32).to(device) # teacher_batch.shape = torch.Size([1, 512])
-                    #     ### llama-7b
-                    #     teacher_batch = teacher_batch.unsqueeze(0)
-                    #     student_outputs = student_model(teacher_batch)
-                    #     student_logits = student_outputs.logits[0] # outputs.logits[0].shape = [512,32000]
-                    #     student_prob_full = F.softmax(student_logits/student_temp, dim=1) # apply softmax to student model
+                    # student output
+                    student_outputs = student_model(input_tokens)
+                    student_logits = student_outputs.logits # student_outputs.logits.shape = torch.Size([2,512,32000])
+                    student_prob = F.softmax(student_logits/student_temp, dim=-1) # [2,512,32000]
 
-                    #     # calculate loss
-                    #     token_loss = 0
-                    #     for (index, teacher_step) in enumerate(teacher_top_logprobs): # index of token
-                    #         teacher_logprobs_list = []
-                    #         student_logprobs_list = []
-                    #         for token, logprob in teacher_step.items():
-                    #             id = int(token)
-                    #             student_logprobs_list.append(student_prob_full[index+1][id]) # token index & id position
-                    #             teacher_logprobs_list.append(logprob)
-                            
-                    #         teacher_logprobs_tensor = torch.tensor(teacher_logprobs_list).to(device)
-                    #         teacher_probs_tensor = teacher_logprobs_tensor.exp() # convert back to regular prob
-                    #         teacher_softmax = F.softmax(teacher_probs_tensor, dim=0)
+                    # search for student top prob by teacher output token
+                    student_top_prob = torch.gather(student_prob[:,1:,:],-1,output_tokens) # [2,511,5]
 
-                    #         student_logprobs_tensor = torch.squeeze(torch.stack(student_logprobs_list))
-                    #         student_softmax = F.softmax(student_logprobs_tensor, dim=0)
-                    #         student_softmax = student_softmax.log()
+                    # process
+                    teacher_top_prob = teacher_top_logprob.exp() # convert to regular prob
+                    student_logsoftmax = F.log_softmax(student_top_prob/student_temp, dim=-1)
+                    teacher_softmax = F.softmax(teacher_top_prob/student_temp, dim=-1)
 
-                    #         loss = F.kl_div(student_softmax, teacher_softmax, reduction="batchmean")
-                    #         if (loss < 0): 
-                    #             print(loss)
-                    #         if (token_loss == 0):
-                    #             token_loss = loss
-                    #         else:
-                    #             token_loss = token_loss + loss
-
-                    #     if (batch_loss == 0):
-                    #         batch_loss = token_loss
-                    #     else:
-                    #         batch_loss = batch_loss + token_loss
-
-                    #########
-                    input_tokens = batch['text'] # [2, 512]
-                    teacher_top_logprobs = batch['top_log_probs'] # [2, 511, 5]
-
-                    input_batch = torch.Tensor(input_tokens).to(torch.int32).to(device)
-                    student_outputs = student_model(input_batch)
-                    student_logits = student_outputs.logits # student_outputs.logits.shape = torch.Size([2, 512, 32000])
-                    student_prob_full = F.softmax(student_logits/student_temp, dim=2) # for the 3rd dimension
-
-                    teacher_softmax_list = []
-                    student_softmax_list = []
-                    for (i, teacher_batch) in enumerate(teacher_top_logprobs): # i is the batch index
-                        t = []
-                        s = []
-                        for (j, teacher_step) in enumerate(teacher_batch): # j is the token index
-                            teacher_list = []
-                            student_list = []
-                            for token, logprob in teacher_step.items():
-                                id = int(token)
-                                teacher_list.append(logprob)
-                                student_list.append(student_prob_full[i][j+1][id])
-
-                            teacher_logprobs_tensor = torch.tensor(teacher_list).to(device)
-                            teacher_probs_tensor = teacher_logprobs_tensor.exp() # convert back to regular prob
-                            teacher_softmax = F.softmax(teacher_probs_tensor, dim=0)
-                            t.append(teacher_softmax)
-
-                            student_logprobs_tensor = torch.squeeze(torch.stack(student_list))
-                            student_softmax = F.softmax(student_logprobs_tensor, dim=0)
-                            student_softmax = student_softmax.log()          
-                            s.append(student_softmax)
-
-                        teacher_softmax_list.append(t)
-                        student_softmax_list.append(s)
-
-                    student_softmax_tensor = torch.stack([torch.stack(sublist) for sublist in student_softmax_list]) # [2, 511, 5]
-                    teacher_softmax_tensor = torch.stack([torch.stack(sublist) for sublist in teacher_softmax_list])
-
-                    batch_loss = F.kl_div(student_softmax_tensor, teacher_softmax_tensor, reduction="batchmean") # [2, 511, 5]
+                    # kl div
+                    batch_loss = F.kl_div(student_logsoftmax, teacher_softmax, reduction="batchmean")
+                    logger.info(f"loss = {batch_loss}")
 
                     logger.info(f"loss = {batch_loss}")
-                    wandb.log({"loss": batch_loss})
+                    if accelerator.is_local_main_process:
+                        wandb.log({"loss": batch_loss})
 
                     # We keep track of the loss at each epoch
                     if args.with_tracking:
@@ -411,46 +287,10 @@ def main():
                 progress_bar.update(1)
                 completed_steps += 1
 
-
-        # Evaluation
-        student_model.eval()
-        losses = []
-        for step, batch in enumerate(eval_dataloader):
-            
-            with torch.no_grad():
-                prompt = batch['text'][0]
-                eval_batch = tokenizer(prompt, return_tensors='pt').to("cuda")
-                outputs = student_model(**eval_batch)
-
-        losses = torch.tensor(0, dtype=torch.float) # loss to 0
-        try:
-            eval_loss = torch.mean(losses)
-            perplexity = math.exp(eval_loss)
-        except OverflowError:
-            perplexity = float("inf")
-
-        logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
-
-        if args.with_tracking:
-            accelerator.log(
-                {
-                    "perplexity": perplexity,
-                    "eval_loss": eval_loss,
-                    "train_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
-                step=completed_steps,
-            )
-
-        output_dir = f"epoch_{epoch}"
-        if args.output_dir is not None:
-            output_dir = os.path.join(args.output_dir, output_dir)
-        accelerator.save_state(output_dir)
-
     # Save checkpoint
+    logger.info("*** [START] Saving Pre-trained Model ***")
     student_model.save_pretrained('student_model')
-
+    logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
     if args.with_tracking:
         accelerator.end_training()
 
