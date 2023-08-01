@@ -160,7 +160,7 @@ cython_debug/
 #.idea/
 
 # data and model
-
+/wandb
 *.bin
 /output_dir
 /student_model
