@@ -13,6 +13,18 @@ class TeacherDataset(Dataset):
                 self.data.append(item)
         print("-----Finish Loading Teacher Dataset-----")
 
+
+        # print("-----Loading Teacher Dataset-----")
+        # self.data = []
+        # with open(data_path, "r") as f:
+        #     for (i,item) in enumerate(jsonlines.Reader(f)): 
+        #         if (i < 100000):
+        #             del item["logprobs"]["tokens"] # delete unused tokens
+        #             del item["logprobs"]["token_logprobs"] # delete unused token_logprobs
+        #             del item["logprobs"]["top_log_probs"][0] # delete starting null value
+        #             self.data.append(item)
+        # print("-----Finish Loading Teacher Dataset-----")
+        
     def __len__(self):
         return len(self.data)
     

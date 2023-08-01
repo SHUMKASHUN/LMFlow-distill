@@ -17,7 +17,7 @@ from transformers import (
     get_scheduler,
     set_seed
 )
-import TeacherDataset
+from TeacherDataset import TeacherDataset
 import argparse
 import math
 from accelerate import Accelerator
@@ -139,7 +139,7 @@ def main():
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
 
-    data_path = './dataset/Robin/0-120.jsonl'
+    data_path = './0-120.jsonl'
     # data_path = '/home/ksshumab/DistillData/LMFlow/distilled_data.jsonl'
     teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
@@ -268,7 +268,6 @@ def main():
 
                     # kl div
                     batch_loss = F.kl_div(student_logsoftmax, teacher_softmax, reduction="batchmean")
-                    logger.info(f"loss = {batch_loss}")
 
                     logger.info(f"loss = {batch_loss}")
                     if accelerator.is_local_main_process:
