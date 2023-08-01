@@ -148,7 +148,7 @@ def main():
         data_path = './dataset/Test/0-120.jsonl'
     elif (args.dataset_name == 'Train'):
         data_path = './dataset/Train/distilled_data.jsonl'
-    teacher_dataset = TeacherDataset.TeacherDataset(data_path)
+    teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
