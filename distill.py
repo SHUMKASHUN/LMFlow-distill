@@ -88,6 +88,7 @@ def arg_parser():
         ),
     )
     parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+    parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
     args = parser.parse_args()
     return args
 
@@ -132,13 +133,15 @@ def main():
         torch_dtype=torch.bfloat16
         # config=config,
     )
+    if (args.gradient_checkpointing == True):
+        student_model.gradient_checkpointing_enable()
     student_model.to(device)
     logger.info("*** [FINISH] Setting up student model ***")
 
 
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
-    # data_path = './0-120.jsonl'
+    # data_path = './datasets/120examples/0-120.jsonl'
     # data_path = '/home/ksshumab/DistillData/LMFlow/distilled_data.jsonl'
     data_path = ''
     if (args.dataset_name == 'Test'):
@@ -231,8 +234,9 @@ def main():
         wandb.init(
             project = "distill-llama-7b",
             config = {
-                "data_path": './dataset/Robin/0-120.jsonl',
-                "batch_size": args.per_device_train_batch_size,
+                "student model": args.student_name,
+                "data path": data_path,
+                "batch size": args.per_device_train_batch_size,
                 "epoch": args.num_train_epochs,
             }
         )
@@ -294,6 +298,7 @@ def main():
     logger.info("*** [START] Saving Pre-trained Model ***")
     student_model.save_pretrained('student_model')
     logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
+
     if args.with_tracking:
         accelerator.end_training()
 
@@ -301,7 +306,10 @@ def main():
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(student_model)
         unwrapped_model.save_pretrained(
-            args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+            args.output_dir,
+            is_main_process=accelerator.is_main_process, 
+            save_function=accelerator.save,
+            state_dict=accelerator.get_state_dict(student_model),
         )
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
