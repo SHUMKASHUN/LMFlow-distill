@@ -138,10 +138,14 @@ def main():
 
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
-
-    data_path = './0-120.jsonl'
+    # data_path = './0-120.jsonl'
     # data_path = '/home/ksshumab/DistillData/LMFlow/distilled_data.jsonl'
-    teacher_dataset = TeacherDataset(data_path)
+    data_path = ''
+    if (args.dataset_name == 'Test'):
+        data_path = './dataset/Test/0-120.jsonl'
+    elif (args.dataset_name == 'Train'):
+        data_path = './dataset/Train/distilled_data.jsonl'
+    teacher_dataset = TeacherDataset.TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
