@@ -88,6 +88,7 @@ def arg_parser():
         ),
     )
     parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+    parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
     args = parser.parse_args()
     return args
 
@@ -132,6 +133,8 @@ def main():
         torch_dtype=torch.bfloat16
         # config=config,
     )
+    if (args.gradient_checkpointing == True):
+        student_model.gradient_checkpointing_enable()
     student_model.to(device)
     logger.info("*** [FINISH] Setting up student model ***")
 
@@ -139,7 +142,7 @@ def main():
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
 
-    data_path = './0-120.jsonl'
+    data_path = './datasets/120examples/0-120.jsonl'
     # data_path = '/home/ksshumab/DistillData/LMFlow/distilled_data.jsonl'
     teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
@@ -297,7 +300,10 @@ def main():
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(student_model)
         unwrapped_model.save_pretrained(
-            args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+            args.output_dir,
+            is_main_process=accelerator.is_main_process, 
+            save_function=accelerator.save,
+            state_dict=accelerator.get_state_dict(student_model),
         )
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
