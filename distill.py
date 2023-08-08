@@ -141,9 +141,13 @@ def main():
 
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
-
-    data_path = './datasets/120examples/0-120.jsonl'
+    # data_path = './datasets/120examples/0-120.jsonl'
     # data_path = '/home/ksshumab/DistillData/LMFlow/distilled_data.jsonl'
+    data_path = ''
+    if (args.dataset_name == 'Test'):
+        data_path = './dataset/Test/0-120.jsonl'
+    elif (args.dataset_name == 'Train'):
+        data_path = './dataset/Train/distilled_data.jsonl'
     teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
@@ -230,8 +234,9 @@ def main():
         wandb.init(
             project = "distill-llama-7b",
             config = {
-                "data_path": './dataset/Robin/0-120.jsonl',
-                "batch_size": args.per_device_train_batch_size,
+                "student model": args.student_name,
+                "data path": data_path,
+                "batch size": args.per_device_train_batch_size,
                 "epoch": args.num_train_epochs,
             }
         )
@@ -293,6 +298,7 @@ def main():
     logger.info("*** [START] Saving Pre-trained Model ***")
     student_model.save_pretrained('student_model')
     logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
+
     if args.with_tracking:
         accelerator.end_training()
 
