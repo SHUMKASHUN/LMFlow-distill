@@ -24,21 +24,6 @@ from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler
 import wandb
 
-def save_history(chat, chat_history_dir):
-    if os.path.exists(f"{chat_history_dir}/chatgpt_distill_history.json"):
-        with open(f"{chat_history_dir}/chatgpt_distill_history.json", "r") as f:
-            old_data = json.load(f)
-            old_data["Instances"].extend(chat)
-        with open(f"{chat_history_dir}/chatgpt_distill_history.json", "w") as f:
-            json.dump(old_data, f, indent=4) 
-    else:
-        return_json = {}
-        return_json["Contributors"] = "Shizhe Diao"
-        return_json["Description"] = "The history of distilling chatgpt to gpt-2",
-        return_json["Instances"] = chat
-        with open(f"{chat_history_dir}/chatgpt_distill_history.json", "w") as f:
-            json.dump(return_json, f, indent=4) 
-
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
     parser.add_argument("--random_seed", type=int, default=1, help="random seed")
