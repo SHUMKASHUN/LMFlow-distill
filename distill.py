@@ -1,8 +1,15 @@
-import logging
-import sys
-import os
+import argparse
 import json
+import logging
+import math
+import os
+import sys
+import wandb
 from tqdm import tqdm
+
+from accelerate import Accelerator
+from accelerate.utils import DummyOptim, DummyScheduler
+from accelerate.logging import get_logger
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -17,12 +24,8 @@ from transformers import (
     get_scheduler,
     set_seed
 )
+
 from TeacherDataset import TeacherDataset
-import argparse
-import math
-from accelerate import Accelerator
-from accelerate.utils import DummyOptim, DummyScheduler
-import wandb
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
@@ -88,17 +91,34 @@ def main():
     teacher_temp = args.teacher_temp
     student_temp = args.student_temp
     set_seed(args.random_seed)
-    logger = logging.getLogger(__name__)
-    logger.setLevel(args.log_level)
 
-    # setup logging
+    # Accelerator setup 
+    accelerator = Accelerator()
+    device = accelerator.device
+
+    # wandb setup
+    if accelerator.is_local_main_process:
+        wandb.init(
+            project = "distill-llama-7b",
+            group = "test",
+            name = args.wandb_name,
+            config = {
+                "student model": args.student_name,
+                "data path": "pending add",
+                "batch size": args.per_device_train_batch_size,
+                "epoch": args.num_train_epochs,
+            }
+        )
+
+    # logging setup
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        level=logging.INFO,
     )
+    logger = get_logger(__name__)
+    logger.info(f"Arguments : {args}")
 
-    # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers in the environment
     accelerator_log_kwargs = {}
 
@@ -106,8 +126,7 @@ def main():
         accelerator_log_kwargs["log_with"] = args.report_to
         accelerator_log_kwargs["logging_dir"] = args.output_dir
 
-    accelerator = Accelerator()
-    device = accelerator.device
+
 
     # setup student model
     logger.info("*** [START] Setting up student model ***")
@@ -133,12 +152,12 @@ def main():
     if (args.dataset_name == 'Test'):
         data_path = './dataset/Test/0-120.jsonl'
     elif (args.dataset_name == 'Train'):
-        data_path = './datasets/Train/33b_blocksize_512_v2.jsonl'
+        data_path = './datasets/Train/distilled_data.jsonl'
     teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
-    eval_dataloader = train_dataloader # for debug only
+    # eval_dataloader = train_dataloader # for debug only
     logger.info("*** [FINISH] Creating dataloader ***")
 
 
@@ -174,8 +193,8 @@ def main():
             optimizer, total_num_steps=args.max_train_steps, warmup_num_steps=args.num_warmup_steps
         )
     # prepare with accelerator
-    student_model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-        student_model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    student_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        student_model, optimizer, train_dataloader, lr_scheduler
     )
 
     # recalculate training steps due to multi-cpus
@@ -214,20 +233,6 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(starting_epoch * num_update_steps_per_epoch)
     completed_steps = starting_epoch * num_update_steps_per_epoch
-
-    # wandb setup
-    if accelerator.is_local_main_process:
-        wandb.init(
-            project = "distill-llama-7b",
-            group = args.student_name,
-            name = args.wandb_name,
-            config = {
-                "student model": args.student_name,
-                "data path": data_path,
-                "batch size": args.per_device_train_batch_size,
-                "epoch": args.num_train_epochs,
-            }
-        )
 
     # distill from soft probs
     for epoch in range(starting_epoch, args.num_train_epochs):
