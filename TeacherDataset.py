@@ -4,7 +4,6 @@ from torch.utils.data import Dataset
 
 class TeacherDataset(Dataset):
     def __init__(self, data_path: str):
-        print("-----Loading Teacher Dataset-----")
         self.data = []
         with open(data_path, "r") as f:
             for item in jsonlines.Reader(f): 
@@ -13,7 +12,6 @@ class TeacherDataset(Dataset):
                 del item["logprobs"]["top_log_probs"][0] # delete starting null value
                 self.data.append(item)
         random.shuffle(self.data)  # shuffle the data after loading
-        print("-----Finish Loading Teacher Dataset-----")
         
     def __len__(self):
         return len(self.data)

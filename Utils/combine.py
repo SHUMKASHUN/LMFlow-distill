@@ -10,7 +10,7 @@ import sys
 import json
 import jsonlines
 count = 0
-for root, ds,fs in os.walk('./DistilledData/'):
+for root, ds,fs in os.walk('../DistilledData/'):
     for f in fs:
         # print(os.path.join(root,f))
         # if f.endswith(".jsonl"):
@@ -18,9 +18,11 @@ for root, ds,fs in os.walk('./DistilledData/'):
         with open(os.path.join(root,f),"r+") as file:
             for item in jsonlines.Reader(file):
                 list_a.append(item)
-        output_writer = jsonlines.open("./distilled_data.jsonl", "a")
+                if (len(list_a) % 1000 == 0):
+                    print(f"{f} {len(list_a)} processed")
+
+        output_writer = jsonlines.open("./33b_blocksize_512_v2.jsonl", "a")
         for index, output in enumerate(list_a):
             output_writer.write(output)
         count += len(list_a)
-        print(f"{f} processed")
 print(count)

@@ -34,8 +34,8 @@ def arg_parser():
     parser.add_argument("--max_tokens", type=int, default=3, help="minimum length for generation")
     parser.add_argument("--max_num_log_probs", type=int, default=5, help="minimum length for generation")
     parser.add_argument("--stop_token", default=None, help="stop token of GPT-3, choice=[\n, None],")
-    parser.add_argument("--teacher_temp", type=float, default=0.7, help="temperature of the teacher")
-    parser.add_argument("--student_temp", type=float, default=0.7, help="temperature of the student")
+    parser.add_argument("--teacher_temp", type=float, default=1.0, help="temperature of the teacher")
+    parser.add_argument("--student_temp", type=float, default=1.0, help="temperature of the student")
     parser.add_argument("--log_level", type=str, default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="logging level")
     parser.add_argument("--validation_split_percentage", type=int, default=20, help="the percentage of validation split")
     parser.add_argument("--demo_example_in_prompt", type=bool, default=False, help="When this flag is True, the prompt will include examplary, samples in the prompt if available from the dataset.")
@@ -73,6 +73,7 @@ def arg_parser():
         ),
     )
     parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+    parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
     parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
     args = parser.parse_args()
     return args
@@ -132,7 +133,7 @@ def main():
     if (args.dataset_name == 'Test'):
         data_path = './dataset/Test/0-120.jsonl'
     elif (args.dataset_name == 'Train'):
-        data_path = './dataset/Train/distilled_data.jsonl'
+        data_path = './datasets/Train/33b_blocksize_512_v2.jsonl'
     teacher_dataset = TeacherDataset(data_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
@@ -218,6 +219,8 @@ def main():
     if accelerator.is_local_main_process:
         wandb.init(
             project = "distill-llama-7b",
+            group = args.student_name,
+            name = args.wandb_name,
             config = {
                 "student model": args.student_name,
                 "data path": data_path,
@@ -232,7 +235,7 @@ def main():
         student_model.train()
         if args.with_tracking:
             total_loss = 0
-
+        step = 0
         for batch in train_dataloader:
             with accelerator.accumulate(student_model):
                 with accelerator.autocast():
@@ -262,7 +265,8 @@ def main():
                     # kl div
                     batch_loss = F.kl_div(student_logsoftmax, teacher_softmax, reduction="batchmean")
 
-                    logger.info(f"loss = {batch_loss}")
+                    logger.info(f"STEP : {step} / {args.max_train_steps}, loss = {batch_loss}")
+                    
                     if accelerator.is_local_main_process:
                         wandb.log({"loss": batch_loss})
 
@@ -273,6 +277,8 @@ def main():
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
+                    step = step + 1
+
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -281,8 +287,6 @@ def main():
 
     # Save checkpoint
     logger.info("*** [START] Saving Pre-trained Model ***")
-    student_model.save_pretrained('student_model')
-    logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
 
     if args.with_tracking:
         accelerator.end_training()
@@ -291,13 +295,14 @@ def main():
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(student_model)
         unwrapped_model.save_pretrained(
-            args.output_dir,
+            args.output_dir + f"/epoch_{epoch}/",
             is_main_process=accelerator.is_main_process, 
             save_function=accelerator.save,
             state_dict=accelerator.get_state_dict(student_model),
         )
         if accelerator.is_main_process:
-            tokenizer.save_pretrained(args.output_dir)
+            tokenizer.save_pretrained(args.output_dir + f"/epoch_{epoch}/")
+    logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
 
 if __name__ == "__main__":
     main()
