@@ -30,10 +30,31 @@ from TeacherDataset import TeacherDataset
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
     parser.add_argument("--random_seed", type=int, default=1, help="random seed")
-    parser.add_argument("--learning_rate", type=float, default=4e-5, help="learning rate")
-    parser.add_argument("--dataset_name", type=str, default="chatgpt-prompt", help="dataset name")
-    parser.add_argument("--teacher_name", type=str, default="gpt-3.5-turbo", choices=["gpt-3.5-turbo", "code-davinci-002", "text-davinci-002"], help="teacher model name")
-    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") #gpt2
+    # Important Hyper-parameters
+    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device")
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="eval batch size per device")
+    parser.add_argument("--learning_rate", type=float, default=2e-5, help="learning rate")
+    parser.add_argument("--beta_1", type=float, default=0.9, help="AdamW Optimizer Beta 1")
+    parser.add_argument("--beta_2", type=float, default=0.999, help="AdamW Optimizer Beta 2")
+    parser.add_argument("--eps", type=float, default=1e-6, help="AdamW Optimizer epsilon")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="AdamW Optimizer weight decay")
+    parser.add_argument("--lr_scheduler_type",
+                        type=SchedulerType,
+                        default="cosine",
+                        help="The scheduler type to use.",
+                        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+                        )
+    parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
+    parser.add_argument("--teacher_name", type=str, default="robin-33b", choices=["robin-33b"], help="teacher model name")
+    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") 
+    # customized path
+    parser.add_argument("--dataset_name_or_path", type=str, 
+                        default="./datasets/Train/33b_blocksize_512_v2.jsonl",
+                        help="dataset name or path")
+    parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+    parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
+
     parser.add_argument("--max_tokens", type=int, default=3, help="minimum length for generation")
     parser.add_argument("--max_num_log_probs", type=int, default=5, help="minimum length for generation")
     parser.add_argument("--stop_token", default=None, help="stop token of GPT-3, choice=[\n, None],")
@@ -43,20 +64,11 @@ def arg_parser():
     parser.add_argument("--validation_split_percentage", type=int, default=20, help="the percentage of validation split")
     parser.add_argument("--demo_example_in_prompt", type=bool, default=False, help="When this flag is True, the prompt will include examplary, samples in the prompt if available from the dataset.")
     parser.add_argument("--local_rank", type=int, help="local rank")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device") #8
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="eval batch size per device") #8
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
+
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
-    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
     parser.add_argument("--max_steps", type=int, default=1e10, help="max steps for debug.")
-    parser.add_argument(
-        "--lr_scheduler_type",
-        type=SchedulerType,
-        default="cosine",
-        help="The scheduler type to use.",
-        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
-    )
+
     parser.add_argument(
         "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
     )
@@ -75,9 +87,6 @@ def arg_parser():
             "Only applicable when `--with_tracking` is passed."
         ),
     )
-    parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
-    parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
-    parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
     args = parser.parse_args()
     return args
 
@@ -85,7 +94,6 @@ def main():
     args = arg_parser()
     max_tokens = args.max_tokens 
     max_num_log_probs = args.max_num_log_probs
-    teacher_name = args.teacher_name
     student_name = args.student_name
     stop = args.stop_token
     teacher_temp = args.teacher_temp
@@ -103,10 +111,11 @@ def main():
             group = "test",
             name = args.wandb_name,
             config = {
-                "student model": args.student_name,
-                "data path": "pending add",
-                "batch size": args.per_device_train_batch_size,
-                "epoch": args.num_train_epochs,
+                "model": {"teacher": args.teacher_name, "student": args.student_name},
+                "data path": args.dataset_name_or_path,
+                "parameters": {"epoch": args.num_train_epochs, "batch size": args.per_device_train_batch_size},
+                "optimizer": {"learning rate": args.learning_rate, "beta_1": args.beta_1, "beta_2": args.beta_2, "epsilon": args.eps},
+                "scheduler": args.lr_scheduler_type
             }
         )
 
@@ -126,8 +135,6 @@ def main():
         accelerator_log_kwargs["log_with"] = args.report_to
         accelerator_log_kwargs["logging_dir"] = args.output_dir
 
-
-
     # setup student model
     logger.info("*** [START] Setting up student model ***")
     config = AutoConfig.from_pretrained(student_name)
@@ -146,14 +153,7 @@ def main():
 
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
-    # data_path = './datasets/120examples/0-120.jsonl'
-    # data_path = '/home/ksshumab/DistillData/LMFlow/distilled_data.jsonl'
-    data_path = ''
-    if (args.dataset_name == 'Test'):
-        data_path = './dataset/Test/0-120.jsonl'
-    elif (args.dataset_name == 'Train'):
-        data_path = './datasets/Train/distilled_data.jsonl'
-    teacher_dataset = TeacherDataset(data_path)
+    teacher_dataset = TeacherDataset(args.dataset_name_or_path)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
@@ -176,7 +176,12 @@ def main():
         or "optimizer" not in accelerator.state.deepspeed_plugin.deepspeed_config
         else DummyOptim 
     )
-    optimizer = optimizer_cls(student_model.parameters(), lr=args.learning_rate)
+    optimizer_kwargs = {
+        "lr": args.learning_rate,
+        "betas": (args.beta_1, args.beta_2),
+        "eps": args.eps,
+    } 
+    optimizer = optimizer_cls(student_model.parameters(), **optimizer_kwargs)
     # dummy scheduler
     if (
         accelerator.state.deepspeed_plugin is None
@@ -185,7 +190,7 @@ def main():
         lr_scheduler = get_scheduler(
             name=args.lr_scheduler_type,
             optimizer=optimizer,
-            num_warmup_steps=args.num_warmup_steps,
+            num_warmup_steps=0.03 * args.max_train_steps,
             num_training_steps=args.max_train_steps,
         )
     else:
@@ -197,14 +202,12 @@ def main():
         student_model, optimizer, train_dataloader, lr_scheduler
     )
 
-    # recalculate training steps due to multi-cpus
+    # recalculate training steps due to multi-gpus
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
-
     logger.info("*** [FINISH] Setting up optimizer and scheduler ***")
 
     # We need to initialize the trackers we use, and also store our configuration.
@@ -236,7 +239,6 @@ def main():
 
     # distill from soft probs
     for epoch in range(starting_epoch, args.num_train_epochs):
-        print("epoch", epoch)
         student_model.train()
         if args.with_tracking:
             total_loss = 0
@@ -269,11 +271,16 @@ def main():
 
                     # kl div
                     batch_loss = F.kl_div(student_logsoftmax, teacher_softmax, reduction="batchmean")
-
-                    logger.info(f"STEP : {step} / {args.max_train_steps}, loss = {batch_loss}")
+                    try:
+                        last_lr = lr_scheduler.get_last_lr()[0]
+                        if torch.is_tensor(last_lr):
+                            last_lr = last_lr.item()
+                    except:
+                        last_lr = 0
+                    logger.info(f"STEP : {step} / {args.max_train_steps}, loss = {batch_loss}, learning rate = {last_lr} ")
                     
                     if accelerator.is_local_main_process:
-                        wandb.log({"loss": batch_loss})
+                        wandb.log({"loss": batch_loss, "learning_rate": last_lr})
 
                     # We keep track of the loss at each epoch
                     if args.with_tracking:
