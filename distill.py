@@ -108,7 +108,7 @@ def main():
     if accelerator.is_local_main_process:
         wandb.init(
             project = "distill-llama-7b",
-            group = "test",
+            group = "llama-7b",
             name = args.wandb_name,
             config = {
                 "model": {"teacher": args.teacher_name, "student": args.student_name},
@@ -262,7 +262,7 @@ def main():
                     student_prob = F.softmax(student_logits/student_temp, dim=-1) # [2,512,32000]
 
                     # search for student top prob by teacher output token
-                    student_top_prob = torch.gather(student_prob[:,1:,:],-1,output_tokens) # [2,511,5]
+                    student_top_prob = torch.gather(student_prob[:,:,:],-1,output_tokens) # [2,511,5]
 
                     # process
                     teacher_top_prob = teacher_top_logprob.exp() # convert to regular prob

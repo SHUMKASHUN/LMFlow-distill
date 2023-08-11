@@ -9,7 +9,7 @@ class TeacherDataset(Dataset):
             for item in jsonlines.Reader(f): 
                 del item["logprobs"]["tokens"] # delete unused tokens
                 del item["logprobs"]["token_logprobs"] # delete unused token_logprobs
-                del item["logprobs"]["top_log_probs"][0] # delete starting null value
+                # del item["logprobs"]["top_log_probs"][0] # delete starting null value
                 self.data.append(item)
         random.shuffle(self.data)  # shuffle the data after loading
         
