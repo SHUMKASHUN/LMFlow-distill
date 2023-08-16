@@ -53,6 +53,7 @@ def arg_parser():
                         default="./datasets/Train/33b_blocksize_512_v2.jsonl",
                         help="dataset name or path")
     parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+    parser.add_argument("--percentage", type=float, default=1.0, help="Percentage that partition dataset.")
     parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
 
     parser.add_argument("--max_tokens", type=int, default=3, help="minimum length for generation")
@@ -153,7 +154,7 @@ def main():
 
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
-    teacher_dataset = TeacherDataset(args.dataset_name_or_path)
+    teacher_dataset = TeacherDataset(args.dataset_name_or_path, args.percentage)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
@@ -297,24 +298,24 @@ def main():
                 progress_bar.update(1)
                 completed_steps += 1
 
-    # Save checkpoint
-    logger.info("*** [START] Saving Pre-trained Model ***")
+        # Save checkpoint
+        logger.info("*** [START] Saving Pre-trained Model ***")
 
-    if args.with_tracking:
-        accelerator.end_training()
+        if args.with_tracking:
+            accelerator.end_training()
 
-    if args.output_dir is not None:
-        accelerator.wait_for_everyone()
-        unwrapped_model = accelerator.unwrap_model(student_model)
-        unwrapped_model.save_pretrained(
-            args.output_dir + f"/epoch_{epoch}/",
-            is_main_process=accelerator.is_main_process, 
-            save_function=accelerator.save,
-            state_dict=accelerator.get_state_dict(student_model),
-        )
-        if accelerator.is_main_process:
-            tokenizer.save_pretrained(args.output_dir + f"/epoch_{epoch}/")
-    logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
+        if args.output_dir is not None:
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(student_model)
+            unwrapped_model.save_pretrained(
+                args.output_dir + f"/epoch_{epoch}/",
+                is_main_process=accelerator.is_main_process, 
+                save_function=accelerator.save,
+                state_dict=accelerator.get_state_dict(student_model),
+            )
+            if accelerator.is_main_process:
+                tokenizer.save_pretrained(args.output_dir + f"/epoch_{epoch}/")
+        logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
 
 if __name__ == "__main__":
     main()

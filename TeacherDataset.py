@@ -3,7 +3,7 @@ import random
 from torch.utils.data import Dataset
 
 class TeacherDataset(Dataset):
-    def __init__(self, data_path: str):
+    def __init__(self, data_path: str, percentage: float = 1):
         self.data = []
         with open(data_path, "r") as f:
             for item in jsonlines.Reader(f): 
@@ -11,6 +11,8 @@ class TeacherDataset(Dataset):
                 del item["logprobs"]["token_logprobs"] # delete unused token_logprobs
                 # del item["logprobs"]["top_log_probs"][0] # delete starting null value
                 self.data.append(item)
+        bound = round(len(self.data) * percentage)
+        self.data = self.data[:bound]
         random.shuffle(self.data)  # shuffle the data after loading
         
     def __len__(self):
