@@ -1,11 +1,12 @@
-# zero3 offload + checkpointing
-CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --config_file configs/default_config.yaml distill.py \
-    --dataset_name_or_path ./datasets/Train/33b_blocksize_512_v2.jsonl \
-    --per_device_train_batch_size 80 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --config_file configs/default_config.yaml distill.py \
+    --dataset_name_or_path /home/ksshumab/minrui/GSM8K/Alpaca_zs_instruction/generate/llama33b_512.jsonl \
+    --per_device_train_batch_size 32 \
     --num_train_epochs 3 \
-    --output_dir "./output_dir/distill_512v2_exp16/" \
-    --percentage 0.5 \
-    --wandb_name "distill_llama7b_512v2_exp16" \
+    --student_name "pinkmanlove/llama-7b-hf" \
+    --output_dir "./output_dir/gsm8k_llama33b_to_7b/" \
+    --percentage 1 \
+    --wandb_name "gsm8k_llama33b_to_7b" \
     --gradient_checkpointing \
     --eps 1e-8 \
-    --learning_rate 4e-5
+    --learning_rate 4e-5 \
+    --method forward_kl_text2text \
