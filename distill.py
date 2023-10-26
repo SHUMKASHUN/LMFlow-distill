@@ -27,14 +27,10 @@ from TeacherDataset import TeacherDataset
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
-    parser.add_argument("--random_seed", type=int, default=1, help="random seed")
-    parser.add_argument("--teacher_name", type=str, default="robin-33b", help="teacher model name")
-    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name")
-    parser.add_argument("--dataset_name_or_path", type=str, 
-                        default="./datasets/0-120.jsonl", 
-                        help="dataset name or path of teacher generated data")
     parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device")
     parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+
+    parser.add_argument("--random_seed", type=int, default=1, help="random seed")
     parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="learning rate")
     parser.add_argument("--beta_1", type=float, default=0.9, help="AdamW Optimizer Beta 1")
@@ -48,20 +44,26 @@ def arg_parser():
                         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
                         )
     parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
-
+    parser.add_argument("--teacher_name", type=str, default="robin-33b", choices=["robin-33b"], help="teacher model name")
+    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") 
+    parser.add_argument("--dataset_name_or_path", type=str, 
+                        default="./datasets/Train/33b_blocksize_512_v2.jsonl",
+                        help="dataset name or path")
     parser.add_argument("--percentage", type=float, default=1.0, help="Percentage that partition dataset.")
     parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
-    parser.add_argument("--method", type=str, default="forward_kl_text_only", 
-                        choices=["forward_kl_text_only", "reverse_kl_text_only", "forward_kl_text2text", "reverse_kl_text2text"], 
-                        help="method for calculating loss function")
 
+    parser.add_argument("--max_tokens", type=int, default=3, help="minimum length for generation")
+    parser.add_argument("--max_num_log_probs", type=int, default=5, help="minimum length for generation")
+    parser.add_argument("--stop_token", default=None, help="stop token of GPT-3, choice=[\n, None],")
     parser.add_argument("--teacher_temp", type=float, default=1.0, help="temperature of the teacher")
     parser.add_argument("--student_temp", type=float, default=1.0, help="temperature of the student")
     parser.add_argument("--log_level", type=str, default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="logging level")
     parser.add_argument("--local_rank", type=int, help="local rank")
+
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
     parser.add_argument("--max_steps", type=int, default=1e10, help="max steps for debug.")
+    parser.add_argument("--method", type=str, default="forward_kl_text_only", choices=["forward_kl_text_only", "reverse_kl_text_only", "forward_kl_text2text", "reverse_kl_text2text"])
 
     parser.add_argument(
         "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
