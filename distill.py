@@ -6,7 +6,6 @@ import os
 import sys
 import wandb
 from tqdm import tqdm
-
 from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler
 from accelerate.logging import get_logger
@@ -24,16 +23,19 @@ from transformers import (
     get_scheduler,
     set_seed
 )
-
 from TeacherDataset import TeacherDataset
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
     parser.add_argument("--random_seed", type=int, default=1, help="random seed")
-    # Important Hyper-parameters
-    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
+    parser.add_argument("--teacher_name", type=str, default="robin-33b", help="teacher model name")
+    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name")
+    parser.add_argument("--dataset_name_or_path", type=str, 
+                        default="./datasets/0-120.jsonl", 
+                        help="dataset name or path of teacher generated data")
     parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device")
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="eval batch size per device")
+    parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="learning rate")
     parser.add_argument("--beta_1", type=float, default=0.9, help="AdamW Optimizer Beta 1")
     parser.add_argument("--beta_2", type=float, default=0.999, help="AdamW Optimizer Beta 2")
@@ -46,26 +48,17 @@ def arg_parser():
                         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
                         )
     parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
-    parser.add_argument("--teacher_name", type=str, default="robin-33b", choices=["robin-33b"], help="teacher model name")
-    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") 
-    # customized path
-    parser.add_argument("--dataset_name_or_path", type=str, 
-                        default="./datasets/Train/33b_blocksize_512_v2.jsonl",
-                        help="dataset name or path")
-    parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
+
     parser.add_argument("--percentage", type=float, default=1.0, help="Percentage that partition dataset.")
     parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
+    parser.add_argument("--method", type=str, default="forward_kl_text_only", 
+                        choices=["forward_kl_text_only", "reverse_kl_text_only", "forward_kl_text2text", "reverse_kl_text2text"], 
+                        help="method for calculating loss function")
 
-    parser.add_argument("--max_tokens", type=int, default=3, help="minimum length for generation")
-    parser.add_argument("--max_num_log_probs", type=int, default=5, help="minimum length for generation")
-    parser.add_argument("--stop_token", default=None, help="stop token of GPT-3, choice=[\n, None],")
     parser.add_argument("--teacher_temp", type=float, default=1.0, help="temperature of the teacher")
     parser.add_argument("--student_temp", type=float, default=1.0, help="temperature of the student")
     parser.add_argument("--log_level", type=str, default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="logging level")
-    parser.add_argument("--validation_split_percentage", type=int, default=20, help="the percentage of validation split")
-    parser.add_argument("--demo_example_in_prompt", type=bool, default=False, help="When this flag is True, the prompt will include examplary, samples in the prompt if available from the dataset.")
     parser.add_argument("--local_rank", type=int, help="local rank")
-
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
     parser.add_argument("--max_steps", type=int, default=1e10, help="max steps for debug.")
@@ -93,11 +86,7 @@ def arg_parser():
 
 def main():
     args = arg_parser()
-    max_tokens = args.max_tokens 
-    max_num_log_probs = args.max_num_log_probs
     student_name = args.student_name
-    stop = args.stop_token
-    teacher_temp = args.teacher_temp
     student_temp = args.student_temp
     set_seed(args.random_seed)
 
@@ -138,13 +127,11 @@ def main():
 
     # setup student model
     logger.info("*** [START] Setting up student model ***")
-    config = AutoConfig.from_pretrained(student_name)
     tokenizer = AutoTokenizer.from_pretrained(student_name, use_fast=False)
     student_model = AutoModelForCausalLM.from_pretrained(
         student_name,
         from_tf=False,
         torch_dtype=torch.bfloat16
-        # config=config,
     )
     if (args.gradient_checkpointing == True):
         student_model.gradient_checkpointing_enable()
@@ -249,29 +236,49 @@ def main():
                 with accelerator.autocast():
                     
                     # extract info from batch 
-                    input_token = batch['input_token'] # [b, 512] list
-                    output_token = batch['output_token'] # [b, 511, 5] list
-                    top_logprob = batch['top_logprob'] # [b, 511, 5] list
-                    # to tensor
-                    input_tokens = torch.Tensor(input_token).to(torch.int32).to(device)
-                    output_tokens = torch.Tensor(output_token).to(torch.int64).to(device)
-                    teacher_top_logprob = torch.Tensor(top_logprob).to(device)
+                    input_token = torch.Tensor(batch['input_token']).to(torch.int32).to(device) # [b, 512]
+                    output_token = torch.Tensor(batch['output_token']).to(torch.int64).to(device) # [b, 512, 5]
+                    teacher_top_prob = torch.Tensor(batch['top_prob']).to(device) # [b, 512, 5]
+                    attention_mask = torch.Tensor(batch['attention_mask']).to(torch.int8).to(device) # [b, 512]
+                    loss_mask = torch.Tensor(batch['loss_mask']).to(torch.int8).to(device) # [b, 512]
 
-                    # student output
-                    student_outputs = student_model(input_tokens)
-                    student_logits = student_outputs.logits # student_outputs.logits.shape = torch.Size([2,512,32000])
-                    student_prob = F.softmax(student_logits/student_temp, dim=-1) # [2,512,32000]
+                    # get student output
+                    student_outputs = student_model(input_ids=input_token, attention_mask=attention_mask)
+                    student_logits = student_outputs.logits # [b, 512, 32000]
+                    student_prob = F.softmax(student_logits/student_temp, dim=-1) # [b, 512, 32000]
 
-                    # search for student top prob by teacher output token
-                    student_top_prob = torch.gather(student_prob[:,:,:],-1,output_tokens) # [2,511,5]
+                    # select student top prob by teacher output token
+                    student_top_prob = torch.gather(student_prob[:,:,:], -1, output_token) # [b, 512, 5]
 
-                    # process
-                    teacher_top_prob = teacher_top_logprob.exp() # convert to regular prob
+                    # take log-softmax
                     student_logsoftmax = F.log_softmax(student_top_prob/student_temp, dim=-1)
-                    teacher_softmax = F.softmax(teacher_top_prob/student_temp, dim=-1)
+                    teacher_logsoftmax = F.log_softmax(teacher_top_prob/student_temp, dim=-1)
 
-                    # kl div
-                    batch_loss = F.kl_div(student_logsoftmax, teacher_softmax, reduction="batchmean")
+                    # calculate loss
+                    batch_loss = 0
+                    ## forward kl div
+                    if(args.method == "forward_kl_text_only"): 
+                        batch_loss = F.kl_div(student_logsoftmax, teacher_logsoftmax, reduction="batchmean", log_target=True)
+                    ## reverse kl div
+                    elif(args.method == "reverse_kl_text_only"): 
+                        batch_loss = F.kl_div(teacher_logsoftmax, student_logsoftmax, reduction="batchmean", log_target=True)
+                    ## apply musk
+                    elif(args.method == "forward_kl_text2text"):
+                        for i in range(args.per_device_train_batch_size): # batch
+                            s = student_logsoftmax[i][loss_mask[i] == 1] # [512, 5]
+                            t = teacher_logsoftmax[i][loss_mask[i] == 1]
+                            batch_loss = batch_loss + F.kl_div(s, t, reduction="sum", log_target=True)
+                        batch_loss = batch_loss/args.per_device_train_batch_size
+                    elif(args.method == "forward_kl_text2text"):
+                        for i in range(args.per_device_train_batch_size): # batch
+                            s = student_logsoftmax[i][loss_mask[i] == 1]
+                            t = teacher_logsoftmax[i][loss_mask[i] == 1]
+                            batch_loss = batch_loss + F.kl_div(t, s, reduction="sum", log_target=True)
+                        batch_loss = batch_loss/args.per_device_train_batch_size
+                    else:
+                        raise NotImplementedError(f"{args.method} not implemented")
+
+                    # log info
                     try:
                         last_lr = lr_scheduler.get_last_lr()[0]
                         if torch.is_tensor(last_lr):
@@ -279,11 +286,8 @@ def main():
                     except:
                         last_lr = 0
                     logger.info(f"STEP : {step} / {args.max_train_steps}, loss = {batch_loss}, learning rate = {last_lr} ")
-                    
                     if accelerator.is_local_main_process:
                         wandb.log({"loss": batch_loss, "learning_rate": last_lr})
-
-                    # We keep track of the loss at each epoch
                     if args.with_tracking:
                         total_loss += batch_loss.detach().float()
                     accelerator.backward(batch_loss)
@@ -292,7 +296,6 @@ def main():
                     optimizer.zero_grad()
                     step = step + 1
 
-
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -300,7 +303,6 @@ def main():
 
         # Save checkpoint
         logger.info("*** [START] Saving Pre-trained Model ***")
-
         if args.with_tracking:
             accelerator.end_training()
 
@@ -319,3 +321,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

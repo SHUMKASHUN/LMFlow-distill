@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Accelerate Launch",
+            "type": "python",
+            "request": "launch",
+            "program": "Utils/generate_top_n.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--model_name",
+                "llama7b",
+                "--dataset_name",
+                "gsm8k",
+                "--dataset_type",
+                "text2text",
+                "--output_dir",
+                "/home/mxubh/GSM8K/alpaca_zs_instruction/generated/part2.jsonl"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "3,4,5"
+            }
+        }
+    ]
+}

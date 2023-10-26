@@ -37,11 +37,13 @@ def to_tokens_and_logprobs(model, tokenizer, tokenized_text, attention_mask, los
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
-    parser.add_argument("--top_n", type=int, default=5, help="output the top n probability")
+    parser.add_argument("--top_n", type=int, default=5, help="output the top n probability of teacher model")
     parser.add_argument("--block_size", type=int, default=512, help="block size")
-    parser.add_argument("--model_name", type=str, default="robin33b", help="name of target model")
+    parser.add_argument("--model_name", type=str, default="llama33b", help="name of teacher model")
     parser.add_argument("--output_dir", type=str, default="/home/mxubh/GSM8K/alpaca_zs_instruction/generated/part.jsonl", help="dataset path")
-    parser.add_argument("--dataset_name", type=str, default="gsm8k", help="name of dataset")
+    parser.add_argument("--dataset_path", type=str, default="gsm8k", help="path of dataset")
+    parser.add_argument("--start_index", type=int, default=0, help="start index for dataset partition")
+    parser.add_argument("--end_index", type=int, default=-1, help="end index for dataset partition")
     parser.add_argument("--dataset_type", type=str, default="text2ext", choices=["text_only", "text2text"], help="dataset type")
     args = parser.parse_args()
     return args
@@ -52,16 +54,15 @@ def main():
         "llama33b": "pinkmanlove/llama-33b-hf",
         "llama7b": "pinkmanlove/llama-7b-hf",
     }
-    dataset_dict = {
-        "gsm8k": "/home/ksshumab/minrui/GSM8K/Alpaca_zs_instruction/train_text2text/zs_train_instruction_text2text.json",
-    }
-
+    model_path = args.name
+    if(args.model_name in model_dict):
+        model_path = model_dict[args.model_name]
     print("--- Start Loading Model ---")
     print(f"The model is {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(model_dict[args.model_name], padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="left")
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(model_dict[args.model_name],
+    model = AutoModelForCausalLM.from_pretrained(model_path,
                                                  torch_dtype=torch.bfloat16,
                                                  offload_folder="offload",
                                                  offload_state_dict=True,
@@ -99,11 +100,12 @@ def main():
     print("--- Start Generating Probability ---")
     print(f"The datset is {args.dataset_name}")
     starttime = datetime.datetime.now()
-    with open(dataset_dict[args.dataset_name], "r+") as data_file:
+    with open(args.dataset_path, "r+") as data_file:
         data_obj = json.loads(data_file.read())
-        data_used = data_obj["instances"]
-        # data_used = data_obj["instances"][:4000]
-        # data_used = data_obj["instances"][4000:]
+        if(args.end_index == -1):
+            data_used = data_obj["instances"][args.start_index:]
+        else:
+            data_used = data_obj["instances"][args.start_index:args.end_index]
         total_len = len(data_used)
         for i, item in enumerate(data_used):
             tokenized_text, loss_mask, attention_mask = tokenize_dataset(data_obj["type"], item)
