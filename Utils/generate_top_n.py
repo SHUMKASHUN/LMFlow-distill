@@ -14,18 +14,19 @@ import datetime
 import json
 import jsonlines
 import torch
+import numpy as np
 from accelerate import Accelerator
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-def to_tokens_and_logprobs(model, tokenizer, tokenized_text, attention_mask, loss_mask, accelerator):
+def to_tokens_and_logprobs(model, tokenized_text, top_n, attention_mask, loss_mask, accelerator):
     tokenized_text_tensor = torch.Tensor([tokenized_text]).to(torch.int32).to(accelerator.device)
     attention_mask_tensor = torch.Tensor([attention_mask]).to(torch.int8).to(accelerator.device)
     outputs = model(input_ids=tokenized_text_tensor, attention_mask=attention_mask_tensor)
     probs = torch.softmax(outputs.logits, dim=-1).detach() # [1, 512, 32000]
     top_token_prob = []
     for j in range(0, probs.shape[1]):
-        temp_token = torch.topk(probs[0][j].flatten(), 5).indices.tolist() # [450,   396,  8778,   917, 29871]
-        temp_prob = torch.topk(probs[0][j].flatten(), 5).values.tolist() # [0.0520, 0.0459, 0.0347, 0.0297, 0.0270]
+        temp_token = torch.topk(probs[0][j].flatten(), top_n).indices.tolist() # [450,   396,  8778,   917, 29871]
+        temp_prob = torch.topk(probs[0][j].flatten(), top_n).values.tolist() # [0.0520, 0.0459, 0.0347, 0.0297, 0.0270]
         top_token_prob.append({key: value for key, value in zip(temp_token, temp_prob)})
     temp = {
             "text": tokenized_text,
@@ -38,31 +39,24 @@ def to_tokens_and_logprobs(model, tokenizer, tokenized_text, attention_mask, los
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
     parser.add_argument("--top_n", type=int, default=5, help="output the top n probability of teacher model")
-    parser.add_argument("--block_size", type=int, default=512, help="block size")
-    parser.add_argument("--model_name", type=str, default="llama33b", help="name of teacher model")
-    parser.add_argument("--output_dir", type=str, default="/home/mxubh/GSM8K/alpaca_zs_instruction/generated/part.jsonl", help="dataset path")
-    parser.add_argument("--dataset_path", type=str, default="gsm8k", help="path of dataset")
+    parser.add_argument("--block_size", type=int, default=512, help="fix the size for each input text")
+    parser.add_argument("--model_path", type=str, default="llama33b", help="teacher model path")
+    parser.add_argument("--output_dir", type=str, default="/home/mxubh/GSM8K/alpaca_zs_instruction/generated/part.jsonl", help="where to save the generated data")
+    parser.add_argument("--dataset_path", type=str, default="", help="path of dataset")
     parser.add_argument("--start_index", type=int, default=0, help="start index for dataset partition")
     parser.add_argument("--end_index", type=int, default=-1, help="end index for dataset partition")
-    parser.add_argument("--dataset_type", type=str, default="text2ext", choices=["text_only", "text2text"], help="dataset type")
     args = parser.parse_args()
     return args
 
 def main():
-    args = arg_parser()
-    model_dict = {
-        "llama33b": "pinkmanlove/llama-33b-hf",
-        "llama7b": "pinkmanlove/llama-7b-hf",
-    }
-    model_path = args.name
-    if(args.model_name in model_dict):
-        model_path = model_dict[args.model_name]
+    args = arg_parser()    
+
     print("--- Start Loading Model ---")
-    print(f"The model is {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="left")
+    print(f"The model is {args.model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, padding_side="left")
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(model_path,
+    model = AutoModelForCausalLM.from_pretrained(args.model_path,
                                                  torch_dtype=torch.bfloat16,
                                                  offload_folder="offload",
                                                  offload_state_dict=True,
@@ -98,7 +92,7 @@ def main():
         return tokenized_text, loss_mask, attention_mask
 
     print("--- Start Generating Probability ---")
-    print(f"The datset is {args.dataset_name}")
+    print(f"The datset is {args.dataset_path}")
     starttime = datetime.datetime.now()
     with open(args.dataset_path, "r+") as data_file:
         data_obj = json.loads(data_file.read())
@@ -109,7 +103,7 @@ def main():
         total_len = len(data_used)
         for i, item in enumerate(data_used):
             tokenized_text, loss_mask, attention_mask = tokenize_dataset(data_obj["type"], item)
-            output = to_tokens_and_logprobs(model, tokenizer, tokenized_text, attention_mask, loss_mask, accelerator)
+            output = to_tokens_and_logprobs(model, tokenized_text, args.top_n, attention_mask, loss_mask, accelerator)
             output_writer = jsonlines.open(args.output_dir, "a")
             output_writer.write(output)
             nowtime = datetime.datetime.now()
