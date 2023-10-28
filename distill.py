@@ -285,6 +285,7 @@ def main():
                         batch_loss = F.kl_div(student_logsoftmax, teacher_logsoftmax, reduction="batchmean", log_target=True)
                     elif(args.method == "reverse_kl_text_only"): 
                         batch_loss = F.kl_div(teacher_logsoftmax, student_logsoftmax, reduction="batchmean", log_target=True)
+
                     elif(args.method == "forward_kl_text2text"):
                         for i in range(args.per_device_train_batch_size): # batch
                             s = student_logsoftmax[i][loss_mask[i] == 1] # [512, 5]
