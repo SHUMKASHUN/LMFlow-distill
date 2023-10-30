@@ -66,6 +66,7 @@ def arg_parser():
     parser.add_argument("--method", type=str, default="forward_kl_text_only")
     parser.add_argument("--use_other_token", type=bool, default=False)
     parser.add_argument("--use_mixed_training", type=bool, default=False)
+    parser.add_argument("--epsilon", type=float, default=1e-6)
 
     parser.add_argument(
         "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
@@ -245,6 +246,12 @@ def main():
                     attention_mask = torch.Tensor(batch['attention_mask']).to(torch.int8).to(device) # [b, 512]
                     loss_mask = torch.Tensor(batch['loss_mask']).to(torch.int8).to(device) # [b, 512]
 
+                    # output.logits predict probability distribution of next token
+                    # map input[i] to logits[i-1]
+                    pred_matrix = torch.ones(input_token.shape).to(device) # [b, 512]
+                    labels = input_token.unsqueeze(-1).expand(output_token.shape) # [b, 512, 5]
+                    pred_matrix[:, 1:] = torch.sum(labels[:, 1:, :] == output_token[:, :511, :], dim=-1) # [b, 511]
+
                     # get student output
                     student_outputs = student_model(input_ids=input_token, attention_mask=attention_mask)
                     student_logits = student_outputs.logits # [b, 512, 32000]
@@ -253,49 +260,54 @@ def main():
                     # select student top prob by teacher output token
                     student_top_prob = torch.gather(student_prob, -1, output_token) # [b, 512, 5]
 
+                    # define a linear normalization that map [0,1] to (0,1)
+                    def normalization(prob, epsilon):
+                        prob = torch.add(prob, epsilon) # [32, 512, 6]
+                        prob = torch.div(prob, torch.sum(prob, dim=-1).unsqueeze(-1))
+                        return torch.log(prob)
+
                     # use other token
                     if(args.use_other_token):
                         sum_student_top_prob = torch.sum(student_top_prob, dim=-1) # [b, 512]
                         sum_teacher_top_prob = torch.sum(teacher_top_prob, dim=-1) # [b, 512]
                         one_prob = torch.ones(sum_student_top_prob.shape).to(device) # [b, 512]
-                        student_ot_prob = torch.sub(one_prob, sum_student_top_prob).unsqueeze(-1) # [b, 512, 1]
-                        teacher_ot_prob = torch.sub(one_prob, sum_teacher_top_prob).unsqueeze(-1) # [b, 512, 1]
+
+                        student_ot_prob = torch.abs(torch.sub(one_prob, sum_student_top_prob)).unsqueeze(-1) # [b, 512, 1]
+                        teacher_ot_prob = torch.abs(torch.sub(one_prob, sum_teacher_top_prob)).unsqueeze(-1) # [b, 512, 1]
 
                         student_cat_prob = torch.cat((student_top_prob, student_ot_prob), dim=-1) # [b, 512, 6]
                         teacher_cat_prob = torch.cat((teacher_top_prob, teacher_ot_prob), dim=-1) # [b, 512, 6]
 
-                        # orevent explosion
-                        epsilon = 1e-4
-                        student_cat_prob[:, :, -1] = student_cat_prob[:, :, -1] + epsilon
-                        student_cat_prob[:, :, 0] = student_cat_prob[:, :, 0] - epsilon
-                        teacher_cat_prob[:, :, -1] = teacher_cat_prob[:, :, -1] + epsilon
-                        teacher_cat_prob[:, :, 0] = teacher_cat_prob[:, :, 0] + epsilon
-                        student_logsoftmax = torch.log(student_cat_prob)
-                        teacher_logsoftmax = torch.log(teacher_cat_prob)
-
+                        student_logsoftmax = normalization(student_cat_prob, args.epsilon)
+                        teacher_logsoftmax = normalization(teacher_cat_prob, args.epsilon)
 
                     # do not use other token; take log-softmax directly
                     else:
                         student_logsoftmax = F.log_softmax(student_top_prob/student_temp, dim=-1)
                         teacher_logsoftmax = F.log_softmax(teacher_top_prob/student_temp, dim=-1)
+                        # student_logsoftmax = normalization(student_top_prob, args.epsilon)
+                        # teacher_logsoftmax = normalization(teacher_top_prob, args.epsilon)
 
                     # calculate loss
                     batch_loss = 0
                     if(args.method == "forward_kl_text_only"): 
                         batch_loss = F.kl_div(student_logsoftmax, teacher_logsoftmax, reduction="batchmean", log_target=True)
-                    elif(args.method == "reverse_kl_text_only"): 
-                        batch_loss = F.kl_div(teacher_logsoftmax, student_logsoftmax, reduction="batchmean", log_target=True)
                     elif(args.method == "forward_kl_text2text"):
-                        for i in range(args.per_device_train_batch_size): # batch
-                            s = student_logsoftmax[i][loss_mask[i] == 1] # [512, 5]
+                        for i in range(args.per_device_train_batch_size):
+                            s = student_logsoftmax[i][loss_mask[i] == 1] # [l, 5]
                             t = teacher_logsoftmax[i][loss_mask[i] == 1]
                             batch_loss = batch_loss + F.kl_div(s, t, reduction="sum", log_target=True)
                         batch_loss = batch_loss/args.per_device_train_batch_size
-                    elif(args.method == "reverse_kl_text2text"):
-                        for i in range(args.per_device_train_batch_size): # batch
-                            s = student_logsoftmax[i][loss_mask[i] == 1]
-                            t = teacher_logsoftmax[i][loss_mask[i] == 1]
-                            batch_loss = batch_loss + F.kl_div(t, s, reduction="sum", log_target=True)
+                    elif(args.method == "mixed_text2text"):
+                        for i in range(args.per_device_train_batch_size):
+                            s = student_logsoftmax[i][loss_mask[i] == 1] # [l, 5]
+                            t = teacher_logsoftmax[i][loss_mask[i] == 1] # [l, 5]
+                            loss_array = torch.sum(F.kl_div(s, t, reduction="none", log_target=True), dim=-1) # [l, 5] -> [l]
+                            for j in range(len(loss_array)):
+                                if(pred_matrix[i][loss_mask[i] == 1][j] == 0): # use ce
+                                    ground_truth = input_token[i][loss_mask[i] == 1][j].item()
+                                    loss_array[j] = -torch.log(student_prob[i][loss_mask[i] == 1][j][ground_truth])
+                            batch_loss = batch_loss + torch.sum(loss_array)    
                         batch_loss = batch_loss/args.per_device_train_batch_size
                     else:
                         raise NotImplementedError(f"{args.method} not implemented")
