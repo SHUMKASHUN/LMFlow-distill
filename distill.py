@@ -64,8 +64,8 @@ def arg_parser():
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
     parser.add_argument("--max_steps", type=int, default=1e10, help="max steps for debug.")
     parser.add_argument("--method", type=str, default="forward_kl_text_only")
-    parser.add_argument("--use_other_token", type=bool, default=False)
-    parser.add_argument("--use_mixed_training", type=bool, default=False)
+    parser.add_argument("--use_linear_norm", type=int, default=0)
+    parser.add_argument("--use_other_token", type=int, default=0)
     parser.add_argument("--epsilon", type=float, default=1e-6)
 
     parser.add_argument(
@@ -250,7 +250,7 @@ def main():
                     # map input[i] to logits[i-1]
                     pred_matrix = torch.ones(input_token.shape).to(device) # [b, 512]
                     labels = input_token.unsqueeze(-1).expand(output_token.shape) # [b, 512, 5]
-                    pred_matrix[:, 1:] = torch.sum(labels[:, 1:, :] == output_token[:, :511, :], dim=-1) # [b, 511]
+                    pred_matrix[:, 1:] = torch.sum(labels[:, 1:, :] == output_token[:, :511, :], dim=-1) # [b, 512]
 
                     # get student output
                     student_outputs = student_model(input_ids=input_token, attention_mask=attention_mask)
@@ -260,11 +260,15 @@ def main():
                     # select student top prob by teacher output token
                     student_top_prob = torch.gather(student_prob, -1, output_token) # [b, 512, 5]
 
-                    # define a linear normalization that map [0,1] to (0,1)
-                    def normalization(prob, epsilon):
-                        prob = torch.add(prob, epsilon) # [32, 512, 6]
-                        prob = torch.div(prob, torch.sum(prob, dim=-1).unsqueeze(-1))
-                        return torch.log(prob)
+                    # normalization function
+                    if(args.use_linear_norm):
+                        def normalization(prob, epsilon):
+                            prob = torch.add(prob, epsilon) # [32, 512, 6]
+                            prob = torch.div(prob, torch.sum(prob, dim=-1).unsqueeze(-1))
+                            return torch.log(prob)
+                    else:
+                        def normalization(prob, epsilon):
+                            return F.log_softmax(prob/student_temp, dim=-1)
 
                     # use other token
                     if(args.use_other_token):
@@ -283,10 +287,8 @@ def main():
 
                     # do not use other token; take log-softmax directly
                     else:
-                        student_logsoftmax = F.log_softmax(student_top_prob/student_temp, dim=-1)
-                        teacher_logsoftmax = F.log_softmax(teacher_top_prob/student_temp, dim=-1)
-                        # student_logsoftmax = normalization(student_top_prob, args.epsilon)
-                        # teacher_logsoftmax = normalization(teacher_top_prob, args.epsilon)
+                        student_logsoftmax = normalization(student_top_prob, args.epsilon)
+                        teacher_logsoftmax = normalization(teacher_top_prob, args.epsilon)
 
                     # calculate loss
                     batch_loss = 0
@@ -306,7 +308,7 @@ def main():
                             for j in range(len(loss_array)):
                                 if(pred_matrix[i][loss_mask[i] == 1][j] == 0): # use ce
                                     ground_truth = input_token[i][loss_mask[i] == 1][j].item()
-                                    loss_array[j] = -torch.log(student_prob[i][loss_mask[i] == 1][j][ground_truth])
+                                    loss_array[j] = -torch.log(student_prob[i][loss_mask[i].tolist().index(1)+j-1][ground_truth])
                             batch_loss = batch_loss + torch.sum(loss_array)    
                         batch_loss = batch_loss/args.per_device_train_batch_size
                     else:
