@@ -44,17 +44,11 @@ def arg_parser():
                         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
                         )
     parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
-    parser.add_argument("--teacher_name", type=str, default="robin-33b", choices=["robin-33b"], help="teacher model name")
     parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") 
-    parser.add_argument("--dataset_name_or_path", type=str, 
-                        default="./datasets/Train/33b_blocksize_512_v2.jsonl",
-                        help="dataset name or path")
-    parser.add_argument("--percentage", type=float, default=1.0, help="Percentage that partition dataset.")
+    parser.add_argument("--teacher_generation_dataset_path", type=str, help="name or path for teacher generated dataset")
+    parser.add_argument("--percentage", type=float, default=1.0, help="percentage that partition dataset.")
     parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
 
-    parser.add_argument("--max_tokens", type=int, default=3, help="minimum length for generation")
-    parser.add_argument("--max_num_log_probs", type=int, default=5, help="minimum length for generation")
-    parser.add_argument("--stop_token", default=None, help="stop token of GPT-3, choice=[\n, None],")
     parser.add_argument("--teacher_temp", type=float, default=1.0, help="temperature of the teacher")
     parser.add_argument("--student_temp", type=float, default=1.0, help="temperature of the student")
     parser.add_argument("--log_level", type=str, default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="logging level")
@@ -63,10 +57,16 @@ def arg_parser():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
     parser.add_argument("--max_steps", type=int, default=1e10, help="max steps for debug.")
-    parser.add_argument("--method", type=str, default="forward_kl_text_only")
-    parser.add_argument("--use_linear_norm", type=int, default=0)
-    parser.add_argument("--use_other_token", type=int, default=0)
-    parser.add_argument("--epsilon", type=float, default=1e-6)
+
+    parser.add_argument("--method", type=str, default="forward_kl_text_only", choices=['forward_kl_text_only', 'forward_kl_text2text'])
+
+    # normalization function parameters
+    parser.add_argument("--use_norm", type=str, default="softmax", choices=['linear', "softmax"])
+    parser.add_argument("--norm_epsilon", type=float, default=1e-6, help="Prevent normalized probability to be zero.")
+
+    # label smoothing parameters
+    parser.add_argument("--use_label_smoothing", type=str, default="no", help="whether to use label smoothing")
+    parser.add_argument("--smoothing_factor", type=float, default=0.1, help="label smoothing factor")
 
     parser.add_argument(
         "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
@@ -90,27 +90,25 @@ def arg_parser():
     return args
 
 def main():
+     # accelerator setup 
     args = arg_parser()
-    student_name = args.student_name
-    student_temp = args.student_temp
     set_seed(args.random_seed)
-
-    # Accelerator setup 
     accelerator = Accelerator()
     device = accelerator.device
 
     # wandb setup
     if accelerator.is_local_main_process:
         wandb.init(
-            project = "distill-llama-7b",
-            group = "llama-7b",
+            project = "knowledge distillation",
+            group = "distill",
             name = args.wandb_name,
             config = {
-                "model": {"teacher": args.teacher_name, "student": args.student_name},
-                "data path": args.dataset_name_or_path,
+                "student model": args.student_name,
+                "teacher generation path": args.teacher_generation_dataset_path,
+                "temp": {"teacher temp": args.teacher_temp, "student temp": args.student_temp},
                 "parameters": {"epoch": args.num_train_epochs, "batch size": args.per_device_train_batch_size},
                 "optimizer": {"learning rate": args.learning_rate, "beta_1": args.beta_1, "beta_2": args.beta_2, "epsilon": args.eps},
-                "scheduler": args.lr_scheduler_type
+                "scheduler": args.lr_scheduler_type,
             }
         )
 
@@ -118,7 +116,7 @@ def main():
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
+        level=args.log_level,
     )
     logger = get_logger(__name__)
     logger.info(f"Arguments : {args}")
@@ -132,12 +130,13 @@ def main():
 
     # setup student model
     logger.info("*** [START] Setting up student model ***")
-    tokenizer = AutoTokenizer.from_pretrained(student_name, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.student_name, use_fast=False)
     student_model = AutoModelForCausalLM.from_pretrained(
-        student_name,
+        args.student_name,
         from_tf=False,
         torch_dtype=torch.bfloat16
     )
+    # enable gradient checkpoint
     if (args.gradient_checkpointing == True):
         student_model.gradient_checkpointing_enable()
     student_model.to(device)
@@ -146,7 +145,7 @@ def main():
 
     # dataloader
     logger.info("*** [START] Creating dataloader ***")
-    teacher_dataset = TeacherDataset(args.dataset_name_or_path, args.percentage)
+    teacher_dataset = TeacherDataset(args.teacher_generation_dataset_path, args.percentage)
     train_dataloader = DataLoader(teacher_dataset, 
                                   batch_size=args.per_device_train_batch_size, 
                                   collate_fn=teacher_dataset.collate_fn)
@@ -229,7 +228,7 @@ def main():
     progress_bar.update(starting_epoch * num_update_steps_per_epoch)
     completed_steps = starting_epoch * num_update_steps_per_epoch
 
-    # distill from soft probs
+    # distill
     for epoch in range(starting_epoch, args.num_train_epochs):
         student_model.train()
         if args.with_tracking:
@@ -239,80 +238,68 @@ def main():
             with accelerator.accumulate(student_model):
                 with accelerator.autocast():
                     
-                    # extract info from batch 
-                    input_token = torch.Tensor(batch['input_token']).to(torch.int32).to(device) # [b, 512]
-                    output_token = torch.Tensor(batch['output_token']).to(torch.int64).to(device) # [b, 512, 5]
-                    teacher_top_prob = torch.Tensor(batch['top_prob']).to(device) # [b, 512, 5]
-                    attention_mask = torch.Tensor(batch['attention_mask']).to(torch.int8).to(device) # [b, 512]
-                    loss_mask = torch.Tensor(batch['loss_mask']).to(torch.int8).to(device) # [b, 512]
+                    # extract info from batch
+                    """
+                    {
+                        input_token:
+                        output_token: 
+                        teacher_top_prob: 
+                        attention_mask:
+                        loss_mask:
 
-                    # output.logits predict probability distribution of next token
-                    # map input[i] to logits[i-1]
-                    pred_matrix = torch.ones(input_token.shape).to(device) # [b, 512]
-                    labels = input_token.unsqueeze(-1).expand(output_token.shape) # [b, 512, 5]
-                    pred_matrix[:, 1:] = torch.sum(labels[:, 1:, :] == output_token[:, :511, :], dim=-1) # [b, 512]
+                    }
+                    """
+                    input_token = torch.Tensor(batch['input_token']).to(torch.int32).to(device) # [batch, block]
+                    output_token = torch.Tensor(batch['output_token']).to(torch.int64).to(device) # [batch, block, 5]
+                    teacher_top_prob = torch.Tensor(batch['top_prob']).to(device) # [batch, block, 5]
+                    attention_mask = torch.Tensor(batch['attention_mask']).to(torch.int8).to(device) # [batch, block]
+                    loss_mask = torch.Tensor(batch['loss_mask']).to(torch.int8).to(device) # [batch, block]
 
                     # get student output
                     student_outputs = student_model(input_ids=input_token, attention_mask=attention_mask)
-                    student_logits = student_outputs.logits # [b, 512, 32000]
-                    student_prob = F.softmax(student_logits/student_temp, dim=-1) # [b, 512, 32000]
+                    student_logits = student_outputs.logits # [batch, block, vocabulary]
+                    student_prob = F.softmax(student_logits, dim=-1) # [batch, block, vocabulary]
 
                     # select student top prob by teacher output token
-                    student_top_prob = torch.gather(student_prob, -1, output_token) # [b, 512, 5]
+                    student_top_prob = torch.gather(student_prob, -1, output_token) # [batch, block, 5]
 
-                    # normalization function
-                    if(args.use_linear_norm):
-                        def normalization(prob, epsilon):
-                            prob = torch.add(prob, epsilon) # [32, 512, 6]
+                    # set normalization function
+                    if(args.use_norm == "linear"):
+                        def normalization(prob, temp):
+                            prob = torch.add(prob, args.norm_epsilon)
                             prob = torch.div(prob, torch.sum(prob, dim=-1).unsqueeze(-1))
                             return torch.log(prob)
+                    elif(args.use_norm == "softmax"):
+                        def normalization(prob, temp):
+                            return F.log_softmax(prob/temp, dim=-1)
                     else:
-                        def normalization(prob, epsilon):
-                            return F.log_softmax(prob/student_temp, dim=-1)
-
-                    # use other token
-                    if(args.use_other_token):
-                        sum_student_top_prob = torch.sum(student_top_prob, dim=-1) # [b, 512]
-                        sum_teacher_top_prob = torch.sum(teacher_top_prob, dim=-1) # [b, 512]
-                        one_prob = torch.ones(sum_student_top_prob.shape).to(device) # [b, 512]
-
-                        student_ot_prob = torch.abs(torch.sub(one_prob, sum_student_top_prob)).unsqueeze(-1) # [b, 512, 1]
-                        teacher_ot_prob = torch.abs(torch.sub(one_prob, sum_teacher_top_prob)).unsqueeze(-1) # [b, 512, 1]
-
-                        student_cat_prob = torch.cat((student_top_prob, student_ot_prob), dim=-1) # [b, 512, 6]
-                        teacher_cat_prob = torch.cat((teacher_top_prob, teacher_ot_prob), dim=-1) # [b, 512, 6]
-
-                        student_logsoftmax = normalization(student_cat_prob, args.epsilon)
-                        teacher_logsoftmax = normalization(teacher_cat_prob, args.epsilon)
-
-                    # do not use other token; take log-softmax directly
-                    else:
-                        student_logsoftmax = normalization(student_top_prob, args.epsilon)
-                        teacher_logsoftmax = normalization(teacher_top_prob, args.epsilon)
+                        raise NotImplementedError(f"The normalization function {args.use_norm} is not implemented")
+                                        
+                    student_logsoftmax = normalization(student_top_prob, args.student_temp)
+                    teacher_logsoftmax = normalization(teacher_top_prob, args.teacher_temp)
 
                     # calculate loss
                     batch_loss = 0
                     if(args.method == "forward_kl_text_only"): 
-                        batch_loss = F.kl_div(student_logsoftmax, teacher_logsoftmax, reduction="batchmean", log_target=True)
+                        for i in range(args.per_device_train_batch_size):
+                            s = student_logsoftmax[i][attention_mask[i] == 1] # [loss, 5]
+                            t = teacher_logsoftmax[i][attention_mask[i] == 1] # [loss, 5]
+                            if(args.use_label_smoothing == "yes"):
+                                t[:, 0] = t[:, 0] - args.smoothing_factor # reduce top 1 prob
+                                t[:, 1:] = t[:, 1:] + args.smoothing_factor/(t.shape[-1]) # increase remaining probs
+                            batch_loss = batch_loss + F.kl_div(s, t, reduction="sum", log_target=True)
+                        batch_loss = batch_loss/args.per_device_train_batch_size    
                     elif(args.method == "forward_kl_text2text"):
                         for i in range(args.per_device_train_batch_size):
-                            s = student_logsoftmax[i][loss_mask[i] == 1] # [l, 5]
+                            s = student_logsoftmax[i][loss_mask[i] == 1]
                             t = teacher_logsoftmax[i][loss_mask[i] == 1]
+                            if(args.use_label_smoothing == "yes"):
+                                t[:, 0] = t[:, 0] - args.smoothing_factor
+                                t[:, 1:] = t[:, 1:] + args.smoothing_factor/(t.shape[-1]-1)
                             batch_loss = batch_loss + F.kl_div(s, t, reduction="sum", log_target=True)
-                        batch_loss = batch_loss/args.per_device_train_batch_size
-                    elif(args.method == "mixed_text2text"):
-                        for i in range(args.per_device_train_batch_size):
-                            s = student_logsoftmax[i][loss_mask[i] == 1] # [l, 5]
-                            t = teacher_logsoftmax[i][loss_mask[i] == 1] # [l, 5]
-                            loss_array = torch.sum(F.kl_div(s, t, reduction="none", log_target=True), dim=-1) # [l, 5] -> [l]
-                            for j in range(len(loss_array)):
-                                if(pred_matrix[i][loss_mask[i] == 1][j] == 0): # use ce
-                                    ground_truth = input_token[i][loss_mask[i] == 1][j].item()
-                                    loss_array[j] = -torch.log(student_prob[i][loss_mask[i].tolist().index(1)+j-1][ground_truth])
-                            batch_loss = batch_loss + torch.sum(loss_array)    
-                        batch_loss = batch_loss/args.per_device_train_batch_size
+                        batch_loss = batch_loss/args.per_device_train_batch_size                        
                     else:
-                        raise NotImplementedError(f"{args.method} not implemented")
+                        raise NotImplementedError(f"The loss {args.method} not implemented")
 
                     # log info
                     try:
@@ -343,6 +330,8 @@ def main():
             accelerator.end_training()
 
         if args.output_dir is not None:
+            if not os.path.exists(args.output_dir):
+                os.makedirs(args.output_dir)
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(student_model)
             unwrapped_model.save_pretrained(
@@ -357,6 +346,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
