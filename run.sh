@@ -12,6 +12,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --config_file configs/def
     --use_norm linear \
     --norm_epsilon 1e-6 \
     --use_label_smoothing yes \
-    --use_label_smoothing yes \
+    --smoothing_factor 0.1 \
     --student_temp 0.28 \
     --teacher_temp 0.28 \
