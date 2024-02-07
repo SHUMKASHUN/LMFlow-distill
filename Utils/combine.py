@@ -12,8 +12,6 @@ import jsonlines
 count = 0
 for root, ds,fs in os.walk('../DistilledData/'):
     for f in fs:
-        # print(os.path.join(root,f))
-        # if f.endswith(".jsonl"):
         list_a = []
         with open(os.path.join(root,f),"r+") as file:
             for item in jsonlines.Reader(file):

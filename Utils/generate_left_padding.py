@@ -70,8 +70,8 @@ def main():
                                         max_length=args.block_size,
                                         truncation=True,
                                         return_tensors="pt")
-            tokenized_text = tokenized_all.input_ids # tensor([1,block_size])
-            attention_mask = tokenized_all.attention_mask # tensor([1,block_size])
+            tokenized_text = tokenized_all.input_ids # [1, block_size]
+            attention_mask = tokenized_all.attention_mask # [1, block_size]
 
             start_idx = torch.nonzero(attention_mask[0] == 1)[0].item()
             input_len = len(tokenizer.encode(data['input']))
@@ -95,6 +95,11 @@ def main():
         total_len = len(data_used)
         for i, item in enumerate(data_used):
             tokenized_text, loss_mask, attention_mask = tokenize_dataset(data_obj["type"], item)
+
+            tokenized_text = tokenized_text.to(model.device)
+            loss_mask = loss_mask.to(model.device)
+            attention_mask = attention_mask.to(model.device)
+
             output = to_tokens_and_logprobs(model, tokenized_text, args.top_n, attention_mask, loss_mask, accelerator)
             output_writer = jsonlines.open(args.output_dir, "a")
             output_writer.write(output)

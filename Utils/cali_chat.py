@@ -1,14 +1,3 @@
-"""
-Input: a target model + a text_only or text2text json file
-Output: 
-    temp = {
-            "text": input tokens [512]
-            "top_token_prob": top n {tokens:probs} [512, n] -> note that the probs doesn't taking log
-            "attention_mask": attention mask [512]
-            "loss_mask": loss_mask [512]
-    }
-
-"""
 import argparse
 import datetime
 import json
@@ -24,7 +13,7 @@ def to_tokens_and_logprobs(model, tokenizer, input_text):
     start_idx = len(tokenized_input)
     # tokenized_text = tokenizer.encode("###Human: " + input_text['input'] + "###Assistant:" + input_text['output'])
     tokenized_text = tokenizer.encode(input_text['input'] + input_text['output'])
-    tokenized_text_tensor = torch.Tensor([tokenized_text]).to(torch.int32) # [1, 512]
+    tokenized_text_tensor = torch.Tensor([tokenized_text]).to(torch.int32).to(model.device) # [1, 512]
     outputs = model(tokenized_text_tensor)
 
     probs = torch.softmax(outputs.logits[0, start_idx-1:-1, :], dim=-1).detach() # [1, 512, 32000] - > [output, 32000]
