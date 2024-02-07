@@ -236,11 +236,11 @@ def main():
     completed_steps = starting_epoch * num_update_steps_per_epoch
 
     # distill
+    step = 0
     for epoch in range(starting_epoch, args.num_train_epochs):
         student_model.train()
         if args.with_tracking:
             total_loss = 0
-        step = 0
         for batch in train_dataloader:
             with accelerator.accumulate(student_model):
                 with accelerator.autocast():
