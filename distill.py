@@ -292,24 +292,29 @@ def main():
                         student_logsoftmax = normalization(student_top_prob, args.student_temp)
                         teacher_logsoftmax = normalization(teacher_top_prob, args.teacher_temp)
 
+                    # use label smoothing
+                    def label_smoothing(prob):
+                        if(args.use_label_smoothing == "yes"):
+                            prob[:, 0] = prob[:, 0] - args.smoothing_factor # reduce top 1 prob
+                            prob[:, 1:] = prob[:, 1:] + args.smoothing_factor/(prob.shape[-1]-1) # increase remaining probs
+                        return prob
+
                     # calculate loss
                     batch_loss = 0
                     if(args.method == "forward_kl_text_only"): 
                         for i in range(args.per_device_train_batch_size):
                             s = student_logsoftmax[i][attention_mask[i] == 1] # [loss, 5]
                             t = teacher_logsoftmax[i][attention_mask[i] == 1] # [loss, 5]
-                            if(args.use_label_smoothing == "yes"):
-                                t[:, 0] = t[:, 0] - args.smoothing_factor # reduce top 1 prob
-                                t[:, 1:] = t[:, 1:] + args.smoothing_factor/(t.shape[-1]) # increase remaining probs
+                            s = label_smoothing(s)
+                            t = label_smoothing(t)
                             batch_loss = batch_loss + F.kl_div(s, t, reduction="sum", log_target=True)
                         batch_loss = batch_loss/args.per_device_train_batch_size    
                     elif(args.method == "forward_kl_text2text"):
                         for i in range(args.per_device_train_batch_size):
                             s = student_logsoftmax[i][loss_mask[i] == 1]
                             t = teacher_logsoftmax[i][loss_mask[i] == 1]
-                            if(args.use_label_smoothing == "yes"):
-                                t[:, 0] = t[:, 0] - args.smoothing_factor
-                                t[:, 1:] = t[:, 1:] + args.smoothing_factor/(t.shape[-1]-1)
+                            s = label_smoothing(s)
+                            t = label_smoothing(t)
                             batch_loss = batch_loss + F.kl_div(s, t, reduction="sum", log_target=True)
                         batch_loss = batch_loss/args.per_device_train_batch_size                        
                     else:
