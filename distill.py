@@ -52,16 +52,16 @@ def arg_parser():
 
     # model & training parameters
     parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") 
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device")
-    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform")
-    parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=16, help="train batch size per device")
+    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform")
+    parser.add_argument("--gradient_checkpointing", default=True, action='store_true', help="Whether to enable gradient checkpointing")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
     parser.add_argument("--teacher_temp", type=float, default=1.0, help="temperature of the teacher")
     parser.add_argument("--student_temp", type=float, default=1.0, help="temperature of the student")
     parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
 
     # optimizer & scheduler parameters
-    parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--beta_1", type=float, default=0.9, help="AdamW Optimizer Beta 1")
     parser.add_argument("--beta_2", type=float, default=0.999, help="AdamW Optimizer Beta 2")
     parser.add_argument("--eps", type=float, default=1e-6, help="AdamW Optimizer epsilon")
