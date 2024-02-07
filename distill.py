@@ -27,50 +27,13 @@ from TeacherDataset import TeacherDataset
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="LLM-Distill")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device")
-    parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Where to store the final model.")
-
-    parser.add_argument("--random_seed", type=int, default=1, help="random seed")
-    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
-    parser.add_argument("--learning_rate", type=float, default=2e-5, help="learning rate")
-    parser.add_argument("--beta_1", type=float, default=0.9, help="AdamW Optimizer Beta 1")
-    parser.add_argument("--beta_2", type=float, default=0.999, help="AdamW Optimizer Beta 2")
-    parser.add_argument("--eps", type=float, default=1e-6, help="AdamW Optimizer epsilon")
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="AdamW Optimizer weight decay")
-    parser.add_argument("--lr_scheduler_type",
-                        type=SchedulerType,
-                        default="cosine",
-                        help="The scheduler type to use.",
-                        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
-                        )
-    parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
-    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") 
-    parser.add_argument("--teacher_generation_dataset_path", type=str, help="name or path for teacher generated dataset")
-    parser.add_argument("--percentage", type=float, default=1.0, help="percentage that partition dataset.")
+    # misc
+    parser.add_argument("--random_seed", type=int, default=1, help="Global random seed")
+    parser.add_argument("--output_dir", type=str, default="./output_dir/", help="Path to save distilled model")
+    parser.add_argument("--teacher_generation_dataset_path", type=str, help="Path to teacher generated dataset")
+    parser.add_argument("--percentage", type=float, default=1.0, help="Percentage of teacher dataset used")
     parser.add_argument("--wandb_name", type=str, default="distill_llama7b", help="The wandb visulization name.")
-
-    parser.add_argument("--teacher_temp", type=float, default=1.0, help="temperature of the teacher")
-    parser.add_argument("--student_temp", type=float, default=1.0, help="temperature of the student")
     parser.add_argument("--log_level", type=str, default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="logging level")
-    parser.add_argument("--local_rank", type=int, help="local rank")
-
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
-    parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
-    parser.add_argument("--max_steps", type=int, default=1e10, help="max steps for debug.")
-
-    parser.add_argument("--method", type=str, default="forward_kl_text_only", choices=['forward_kl_text_only', 'forward_kl_text2text'])
-
-    # normalization function parameters
-    parser.add_argument("--use_norm", type=str, default="softmax", choices=['linear', "softmax"])
-    parser.add_argument("--norm_epsilon", type=float, default=1e-6, help="Prevent normalized probability to be zero.")
-
-    # label smoothing parameters
-    parser.add_argument("--use_label_smoothing", type=str, default="no", help="whether to use label smoothing")
-    parser.add_argument("--smoothing_factor", type=float, default=0.1, help="label smoothing factor")
-
-    parser.add_argument(
-        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
-    )
     parser.add_argument(
         "--with_tracking",
         action="store_true",
@@ -86,6 +49,50 @@ def arg_parser():
             "Only applicable when `--with_tracking` is passed."
         ),
     )
+
+    # model & training parameters
+    parser.add_argument("--student_name", type=str, default="pinkmanlove/llama-7b-hf", help="student model name") 
+    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="train batch size per device")
+    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform")
+    parser.add_argument("--gradient_checkpointing", default=False, action='store_true', help="Whether to enable gradient checkpointing")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation steps")
+    parser.add_argument("--teacher_temp", type=float, default=1.0, help="temperature of the teacher")
+    parser.add_argument("--student_temp", type=float, default=1.0, help="temperature of the student")
+    parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps to perform. If provided, overrides num_train_epochs.")
+
+    # optimizer & scheduler parameters
+    parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--beta_1", type=float, default=0.9, help="AdamW Optimizer Beta 1")
+    parser.add_argument("--beta_2", type=float, default=0.999, help="AdamW Optimizer Beta 2")
+    parser.add_argument("--eps", type=float, default=1e-6, help="AdamW Optimizer epsilon")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="AdamW Optimizer weight decay")
+    parser.add_argument("--lr_scheduler_type",
+                        type=SchedulerType,
+                        default="cosine",
+                        help="The scheduler type to use.",
+                        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+                        )
+    parser.add_argument("--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler")
+    
+    # distill parameters
+    parser.add_argument("--method", 
+                        type=str, 
+                        default="forward_kl_text_only", 
+                        choices=['forward_kl_text_only', 'forward_kl_text2text'], 
+                        help="Text format"
+                        )
+
+    # normalization function parameters
+    parser.add_argument("--use_norm", type=str, default="softmax", choices=['linear', "softmax"], help="Normalization function")
+    parser.add_argument("--norm_epsilon", type=float, default=1e-6, help="Prevent normalized probability to be zero.")
+
+    # label smoothing parameters
+    parser.add_argument("--use_label_smoothing", type=str, default="no", help="Whether to use label smoothing")
+    parser.add_argument("--smoothing_factor", type=float, default=0.1, help="Label smoothing factor")
+
+    # other token parameters
+    parser.add_argument("--use_other_token", type=str, default="no")
+
     args = parser.parse_args()
     return args
 
@@ -99,7 +106,7 @@ def main():
     # wandb setup
     if accelerator.is_local_main_process:
         wandb.init(
-            project = "knowledge distillation",
+            project = "distill7b",
             group = "distill",
             name = args.wandb_name,
             config = {
@@ -274,9 +281,16 @@ def main():
                             return F.log_softmax(prob/temp, dim=-1)
                     else:
                         raise NotImplementedError(f"The normalization function {args.use_norm} is not implemented")
-                                        
-                    student_logsoftmax = normalization(student_top_prob, args.student_temp)
-                    teacher_logsoftmax = normalization(teacher_top_prob, args.teacher_temp)
+
+                    # use other token
+                    if(args.use_other_token == "yes"):
+                        student_ot = (1 - student_top_prob.sum(dim=-1, keepdim=True)).to(device)
+                        teacher_ot = (1 - teacher_top_prob.sum(dim=-1, keepdim=True)).to(device)
+                        student_logsoftmax = torch.cat([student_top_prob, student_ot], dim=-1)
+                        teacher_logsoftmax = torch.cat([teacher_top_prob, teacher_ot], dim=-1)
+                    else:
+                        student_logsoftmax = normalization(student_top_prob, args.student_temp)
+                        teacher_logsoftmax = normalization(teacher_top_prob, args.teacher_temp)
 
                     # calculate loss
                     batch_loss = 0
@@ -325,13 +339,11 @@ def main():
                 completed_steps += 1
 
         # Save checkpoint
-        logger.info("*** [START] Saving Pre-trained Model ***")
+        logger.info("*** [START] Saving Distilled Model ***")
         if args.with_tracking:
             accelerator.end_training()
 
         if args.output_dir is not None:
-            if not os.path.exists(args.output_dir):
-                os.makedirs(args.output_dir)
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(student_model)
             unwrapped_model.save_pretrained(
@@ -342,7 +354,7 @@ def main():
             )
             if accelerator.is_main_process:
                 tokenizer.save_pretrained(args.output_dir + f"/epoch_{epoch}/")
-        logger.info("*** [FINISH] Finish Saving Pre-trained Model ***")
+        logger.info("*** [FINISH] Finish Saving Distilled Model ***")
 
 if __name__ == "__main__":
     main()

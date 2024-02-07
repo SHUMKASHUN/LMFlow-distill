@@ -1,17 +1,19 @@
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --config_file configs/default_config.yaml distill.py \
-    --teacher_generation_dataset_path /home/ksshumab/minrui/Data-New/Alpaca/generated/alpaca-llama2-13b-finetune-1e-5-text2text-90.jsonl \
-    --per_device_train_batch_size 32 \
-    --num_train_epochs 4 \
-    --student_name meta-llama/Llama-2-7b-hf \
-    --output_dir "./output_dir/alpaca/alpaca_llama2-7b_linear-label_smoothing-4e-5-text2text-90/" \
-    --wandb_name "alpaca_llama2-7b_linear-label_smoothing-4e-5-text2text-90" \
+    --teacher_generation_dataset_path /home/ksshumab/minrui/Data-New/Alpaca/generated/alpaca_Qwen1.5-7B_finetune_2e-6_text2text.jsonl \
+    --student_name Qwen/Qwen1.5-1.8B \
+    --per_device_train_batch_size 8 \
+    --gradient_accumulation_steps 2 \
+    --num_train_epochs 3 \
+    --output_dir /home/ksshumab/minrui/Other_Token/Qwen1.5/alpaca_Qwen1.5-1.8B_linear_2e-6_text2text.jsonl \
+    --wandb_name "alpaca_Qwen1.5-1.8B_linear_2e-6_text2text" \
     --gradient_checkpointing \
     --eps 1e-8 \
-    --learning_rate 4e-5 \
+    --learning_rate 2e-6 \
     --method forward_kl_text2text \
+    --use_other_token no \
     --use_norm linear \
     --norm_epsilon 1e-6 \
-    --use_label_smoothing yes \
+    --use_label_smoothing no \
     --smoothing_factor 0.1 \
-    --student_temp 0.28 \
-    --teacher_temp 0.28 \
+    --student_temp 1 \
+    --teacher_temp 1 \
